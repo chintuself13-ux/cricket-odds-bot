@@ -14,10 +14,53 @@ from typing import Dict, List, Optional, Callable, Any, Tuple
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
-from telegram_notifier import send_telegram_alert
+import urllib.parse
 from exchange_scraper import global_exchange_scraper, format_indian_odds
 
 logger = logging.getLogger("OddsEngine")
+
+def send_telegram_alert(bot_token: str, chat_id: str | int, message: str) -> Tuple[bool, str]:
+    """
+    Dispatches HTML alert message to Telegram Bot API with notification sound enabled.
+    """
+    if not bot_token or not chat_id:
+        err = "Bot token or Chat ID missing"
+        print(f"[SEND ERROR] {err}", flush=True)
+        return False, err
+
+    try:
+        clean_chat_id = int(str(chat_id).strip())
+    except ValueError:
+        clean_chat_id = str(chat_id).strip()
+
+    url = f"https://api.telegram.org/bot{str(bot_token).strip()}/sendMessage"
+    payload = {
+        "chat_id": clean_chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "disable_notification": False
+    }
+
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            res_body = json.loads(resp.read().decode("utf-8"))
+            if res_body.get("ok"):
+                print(f"[SEND SUCCESS] Alert delivered to chat_id: {clean_chat_id}", flush=True)
+                return True, "Alert sent successfully"
+            else:
+                desc = res_body.get("description", "Unknown API error")
+                print(f"[SEND ERROR] Telegram API rejected message: {desc}", flush=True)
+                return False, f"Telegram API error: {desc}"
+    except Exception as e:
+        print(f"[SEND ERROR] Exception while sending alert to Telegram: {e}", flush=True)
+        return False, str(e)
 
 class OddsDataEngine:
     """
