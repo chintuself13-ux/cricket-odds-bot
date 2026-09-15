@@ -5,12 +5,91 @@ import asyncio
 import threading
 import logging
 import html
-from typing import Dict, Any, Optional
+import json
+import urllib.request
+import urllib.parse
+from typing import Dict, Any, Optional, List, Tuple
 
-from telegram_bot_client import TelegramBotClient
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
 from exchange_scraper import global_exchange_scraper, format_indian_odds
 from mock_server import MockOddsServer, DEFAULT_PORT
+
+
+class TelegramBotClient:
+    """
+    Lightweight Telegram Bot API client using urllib.
+    Supports Long Polling (getUpdates) and message dispatching.
+    """
+    def __init__(self, token: str):
+        self.token = token.strip()
+        self.base_url = f"https://api.telegram.org/bot{self.token}"
+
+    def get_me(self) -> Tuple[bool, Dict[str, Any]]:
+        """Verify bot token and fetch bot info."""
+        return self._make_request("getMe")
+
+    def get_updates(self, offset: Optional[int] = None, timeout: int = 25) -> Tuple[bool, List[Dict[str, Any]]]:
+        """Fetch incoming updates via long polling."""
+        params = {"timeout": timeout}
+        if offset is not None:
+            params["offset"] = offset
+        ok, res = self._make_request("getUpdates", params=params, timeout=timeout + 10)
+        if ok and isinstance(res, list):
+            return True, res
+        return False, []
+
+    def send_message(
+        self,
+        chat_id: str | int,
+        text: str,
+        parse_mode: str = "HTML",
+        disable_notification: bool = False,
+        reply_markup: Optional[Dict[str, Any]] = None
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Send message to a Telegram chat."""
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
+            "disable_notification": disable_notification
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+
+        return self._make_request("sendMessage", json_payload=payload)
+
+    def _make_request(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        json_payload: Optional[Dict[str, Any]] = None,
+        timeout: float = 10.0
+    ) -> Tuple[bool, Any]:
+        url = f"{self.base_url}/{endpoint}"
+        try:
+            if json_payload is not None:
+                data = json.dumps(json_payload).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/json"}
+                )
+            elif params:
+                query_string = urllib.parse.urlencode(params)
+                url = f"{url}?{query_string}"
+                req = urllib.request.Request(url)
+            else:
+                req = urllib.request.Request(url)
+
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                if result.get("ok"):
+                    return True, result.get("result")
+                else:
+                    return False, result.get("description", "Telegram API Error")
+        except Exception as e:
+            return False, str(e)
 
 # Global dictionary for instant 0ms /status response: ACTIVE_TRACKS[chat_id]
 ACTIVE_TRACKS: Dict[Any, Dict[str, Dict[str, Any]]] = {}
