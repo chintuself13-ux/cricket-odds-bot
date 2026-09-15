@@ -141,6 +141,41 @@ except ImportError:
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8903237867:AAFkZV59PF6_9ChXh7S5b9_AfsrG9tLUT-o").strip()
 
+DEFAULT_ADMIN_ID = 7592394328
+ALLOWED_USERS_FILE = "allowed_users.json"
+
+
+def load_allowed_users() -> set[int]:
+    allowed = {DEFAULT_ADMIN_ID}
+    env_admin = os.environ.get("ADMIN_ID")
+    if env_admin:
+        try:
+            allowed.add(int(env_admin))
+        except ValueError:
+            pass
+    if os.path.exists(ALLOWED_USERS_FILE):
+        try:
+            with open(ALLOWED_USERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    for u in data:
+                        allowed.add(int(u))
+        except Exception as e:
+            logger.warning(f"Could not load allowed_users.json: {e}")
+    return allowed
+
+
+def save_allowed_users(allowed: set[int]):
+    try:
+        with open(ALLOWED_USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(allowed), f)
+    except Exception as e:
+        logger.warning(f"Could not save allowed_users.json: {e}")
+
+
+ALLOWED_USERS = load_allowed_users()
+
+
 class TelegramOddsBot:
     def __init__(self, token: str):
         self.client = TelegramBotClient(token)
@@ -177,6 +212,7 @@ class TelegramOddsBot:
             print(f"🚀 Telegram Live Cricket Alert & Cashout Bot (@{bot_name})")
             print(f"Async Architecture: Detached Background Workers (0ms /status)")
             print(f"Status: RUNNING 24/7 (Ball-by-ball Crex Odds)")
+            print(f"Admin ID: {DEFAULT_ADMIN_ID} | Authorized Users: {len(ALLOWED_USERS)}")
             print(f"Health Check HTTP Server: 0.0.0.0:{self.port}")
             print(f"==================================================\n")
 
@@ -221,14 +257,65 @@ class TelegramOddsBot:
             return
 
         chat_id = message["chat"]["id"]
+        from_user = message.get("from", {})
+        raw_user_id = from_user.get("id", chat_id)
+        try:
+            user_id = int(raw_user_id)
+        except (ValueError, TypeError):
+            user_id = raw_user_id
+
         text = message["text"].strip()
         parts = text.split()
         cmd = parts[0].lower() if parts else ""
 
-        logger.info(f"Received from chat {chat_id}: {text}")
+        logger.info(f"Received from chat {chat_id} (user {user_id}): {text}")
 
+        # Command /allow <user_id> (Admin Only)
+        if cmd == "/allow":
+            asyncio.create_task(self._cmd_allow_async(chat_id, user_id, parts[1:]))
+            return
+
+        # Authorization check
+        is_authorized = False
+        try:
+            if int(user_id) in ALLOWED_USERS or int(chat_id) in ALLOWED_USERS:
+                is_authorized = True
+        except (ValueError, TypeError):
+            if user_id in ALLOWED_USERS or chat_id in ALLOWED_USERS:
+                is_authorized = True
+
+        if not is_authorized:
+            first_name = html.escape(str(from_user.get("first_name", "")))
+            last_name = html.escape(str(from_user.get("last_name", "")))
+            full_name = f"{first_name} {last_name}".strip() or "User"
+            uname = from_user.get("username")
+            username = f"@{html.escape(str(uname))}" if uname else "No username"
+
+            # 1. Show unauthorized message to user with their ID
+            user_msg = (
+                f"🔒 <b>ACCESS REQUIRED</b>\n\n"
+                f"Welcome, <b>{full_name}</b>!\n"
+                f"Your Telegram ID: <code>{user_id}</code>\n\n"
+                f"⚠️ Access to this Live Cricket Odds Bot requires Admin authorization.\n"
+                f"An approval request has been sent to the Admin. Please wait for approval."
+            )
+            asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, user_msg, "HTML", False))
+
+            # 2. Alert Admin (7592394328) with user info & ready-to-use /allow command
+            admin_alert = (
+                f"🔔 <b>NEW ACCESS REQUEST RECEIVED!</b>\n\n"
+                f"👤 <b>Name:</b> {full_name}\n"
+                f"🏷️ <b>Username:</b> {username}\n"
+                f"🆔 <b>User ID:</b> <code>{user_id}</code>\n\n"
+                f"👉 Approve user instantly:\n"
+                f"<code>/allow {user_id}</code>"
+            )
+            asyncio.create_task(asyncio.to_thread(self.client.send_message, DEFAULT_ADMIN_ID, admin_alert, "HTML", False))
+            return
+
+        # Dispatch commands for authorized users
         if cmd in ["/start", "/help"]:
-            self._cmd_start(chat_id)
+            self._cmd_start(chat_id, user_id)
         elif cmd == "/matches":
             asyncio.create_task(self._cmd_matches_async(chat_id))
         elif cmd == "/track":
@@ -249,7 +336,45 @@ class TelegramOddsBot:
                 "❓ Unknown command. Send <code>/help</code> or <code>/matches</code> to get started."
             )
 
-    def _cmd_start(self, chat_id: str | int):
+    async def _cmd_allow_async(self, chat_id: str | int, sender_id: str | int, args: list):
+        try:
+            is_admin = (int(sender_id) == DEFAULT_ADMIN_ID or int(chat_id) == DEFAULT_ADMIN_ID)
+        except (ValueError, TypeError):
+            is_admin = (sender_id == DEFAULT_ADMIN_ID or chat_id == DEFAULT_ADMIN_ID)
+
+        if not is_admin:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can authorize users.", "HTML", False)
+            return
+
+        if not args:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "⚠️ <b>Usage Syntax:</b> <code>/allow &lt;user_id&gt;</code>\n"
+                "<i>Example:</i> <code>/allow 123456789</code>",
+                "HTML", False
+            )
+            return
+
+        try:
+            target_user_id = int(args[0].strip())
+            ALLOWED_USERS.add(target_user_id)
+            save_allowed_users(ALLOWED_USERS)
+
+            admin_msg = f"✅ User <code>{target_user_id}</code> has been authorized successfully!"
+            await asyncio.to_thread(self.client.send_message, chat_id, admin_msg, "HTML", False)
+
+            user_msg = (
+                f"🎉 <b>ACCESS GRANTED!</b>\n\n"
+                f"You have been authorized by the Admin.\n"
+                f"Send <code>/matches</code> to view live matches and odds!"
+            )
+            asyncio.create_task(asyncio.to_thread(self.client.send_message, target_user_id, user_msg, "HTML", False))
+        except ValueError:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid User ID. Must be a numeric Telegram ID.", "HTML", False)
+
+    def _cmd_start(self, chat_id: str | int, user_id: Optional[str | int] = None):
+        admin_extra = "• <code>/allow &lt;user_id&gt;</code> — (Admin Only) Authorize a user for bot access\n" if (user_id and (user_id == DEFAULT_ADMIN_ID or str(user_id) == str(DEFAULT_ADMIN_ID))) else ""
         help_text = (
             "💰 <b>LIVE CRICKET ODDS ALERT & CASHOUT CALCULATOR BOT</b> ⚡\n\n"
             "Monitor live cricket exchange rates with an <b>automated Green Book Cashout Calculator</b>! "
@@ -263,6 +388,7 @@ class TelegramOddsBot:
             "• <code>/mute</code> — Silence repeating alert notifications without ending tracking\n"
             "• <code>/unmute</code> — Resume alert notifications\n"
             "• <code>/stop [team]</code> — Stop tracking a match and clear background task\n"
+            f"{admin_extra}"
             "• <code>/setodd &lt;team&gt; &lt;odd&gt;</code> — Modify live odd for instant testing (e.g., <code>/setodd India 0.25</code>)\n"
         )
         self.client.send_message(chat_id, help_text)
