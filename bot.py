@@ -12,7 +12,6 @@ from typing import Dict, Any, Optional, List, Tuple
 
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
 from exchange_scraper import global_exchange_scraper, format_indian_odds
-from mock_server import MockOddsServer, DEFAULT_PORT
 
 
 class TelegramBotClient:
@@ -123,7 +122,6 @@ class TelegramOddsBot:
             on_alert_trigger=self._on_alert_trigger,
             on_error=self._on_error
         )
-        self.mock_server = MockOddsServer(port=DEFAULT_PORT)
         self.last_update_id = 0
         self.running = False
         
@@ -147,15 +145,11 @@ class TelegramOddsBot:
         print(f"Status: RUNNING 24/7 (Ball-by-ball Crex Odds)")
         print(f"==================================================\n")
 
-        # 2. Launch Local Mock Server in background for fallback
-        if self.mock_server.start():
-            logger.info(f"Local Mock API server running at http://127.0.0.1:{DEFAULT_PORT}/api/odds")
-
-        # 3. Start Odds Engine async loop
+        # 2. Start Odds Engine async loop
         await self.engine.start_async()
         self.running = True
 
-        # 4. Start Telegram Updates Async Polling loop
+        # 3. Start Telegram Updates Async Polling loop
         try:
             while self.running:
                 ok, updates = await asyncio.to_thread(self.client.get_updates, offset=self.last_update_id + 1, timeout=2)
@@ -176,8 +170,6 @@ class TelegramOddsBot:
         for task in self.tracking_tasks.values():
             task.cancel()
         await self.engine.stop_async()
-        if self.mock_server.httpd:
-            self.mock_server.stop()
         logger.info("Bot stopped cleanly.")
 
     def stop(self):
@@ -564,7 +556,6 @@ class TelegramOddsBot:
         try:
             val = float(val_str)
             global_exchange_scraper.set_team_odd_override(team, val)
-            self.mock_server.set_team_odd(team, val)
 
             if chat_id in ACTIVE_TRACKS or str(chat_id) in ACTIVE_TRACKS:
                 key = chat_id if chat_id in ACTIVE_TRACKS else str(chat_id)
