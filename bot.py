@@ -8,10 +8,38 @@ import html
 import json
 import urllib.request
 import urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List, Tuple
 
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
 from exchange_scraper import global_exchange_scraper, format_indian_odds
+
+
+class RenderHealthCheckHandler(BaseHTTPRequestHandler):
+    """
+    Simple HTTP Request Handler to satisfy Render Web Service port scans and health checks.
+    """
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - Telegram Live Cricket Odds Bot is Active")
+
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP server logs to keep console clean
+
+
+def start_health_server(port: int):
+    """Start background HTTP health check server on 0.0.0.0:<port>."""
+    try:
+        server = HTTPServer(("0.0.0.0", port), RenderHealthCheckHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"Health check HTTP server listening on 0.0.0.0:{port}")
+        return server
+    except Exception as e:
+        logger.warning(f"Failed to start health check HTTP server on port {port}: {e}")
+        return None
 
 
 class TelegramBotClient:
@@ -125,31 +153,38 @@ class TelegramOddsBot:
         self.last_update_id = 0
         self.running = False
         
+        # Bind PORT for Render Web Service health checks (default 10000)
+        self.port = int(os.environ.get("PORT", "10000"))
+        self.health_server = None
+        
         # Shared active tracking state dictionary for instant 0ms /status response
         self.active_tracks: Dict[str, Dict[str, Any]] = {}
         self.tracking_tasks: Dict[str, asyncio.Task] = {}
 
     async def start_async(self):
-        # 1. Verify token
+        # 1. Start background HTTP server for Render Web Service Port Scan & Health Checks
+        self.health_server = start_health_server(self.port)
+
+        # 2. Verify token
         ok, bot_info = await asyncio.to_thread(self.client.get_me)
         if not ok:
-            logger.error(f"Failed to connect to Telegram API: {bot_info}")
-            print(f"\n❌ Error: Invalid Telegram Bot Token: {bot_info}")
-            sys.exit(1)
+            logger.warning(f"Telegram API Token Verification Warning: {bot_info}. Health server remains active on 0.0.0.0:{self.port}.")
+            print(f"\n⚠️ Health Check HTTP Server listening on 0.0.0.0:{self.port}. (Waiting for valid TELEGRAM_BOT_TOKEN)")
+        else:
+            bot_name = bot_info.get("username", "OddsBot")
+            logger.info(f"Bot connected successfully as @{bot_name}")
+            print(f"\n==================================================")
+            print(f"🚀 Telegram Live Cricket Alert & Cashout Bot (@{bot_name})")
+            print(f"Async Architecture: Detached Background Workers (0ms /status)")
+            print(f"Status: RUNNING 24/7 (Ball-by-ball Crex Odds)")
+            print(f"Health Check HTTP Server: 0.0.0.0:{self.port}")
+            print(f"==================================================\n")
 
-        bot_name = bot_info.get("username", "OddsBot")
-        logger.info(f"Bot connected successfully as @{bot_name}")
-        print(f"\n==================================================")
-        print(f"🚀 Telegram Live Cricket Alert & Cashout Bot (@{bot_name})")
-        print(f"Async Architecture: Detached Background Workers (0ms /status)")
-        print(f"Status: RUNNING 24/7 (Ball-by-ball Crex Odds)")
-        print(f"==================================================\n")
-
-        # 2. Start Odds Engine async loop
+        # 3. Start Odds Engine async loop
         await self.engine.start_async()
         self.running = True
 
-        # 3. Start Telegram Updates Async Polling loop
+        # 4. Start Telegram Updates Async Polling loop
         try:
             while self.running:
                 ok, updates = await asyncio.to_thread(self.client.get_updates, offset=self.last_update_id + 1, timeout=2)
@@ -170,6 +205,11 @@ class TelegramOddsBot:
         for task in self.tracking_tasks.values():
             task.cancel()
         await self.engine.stop_async()
+        if self.health_server:
+            try:
+                self.health_server.shutdown()
+            except Exception:
+                pass
         logger.info("Bot stopped cleanly.")
 
     def stop(self):
