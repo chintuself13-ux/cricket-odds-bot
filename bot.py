@@ -270,9 +270,15 @@ class TelegramOddsBot:
 
         logger.info(f"Received from chat {chat_id} (user {user_id}): {text}")
 
-        # Command /allow <user_id> (Admin Only)
+        # Admin Commands
         if cmd == "/allow":
             asyncio.create_task(self._cmd_allow_async(chat_id, user_id, parts[1:]))
+            return
+        elif cmd == "/revoke":
+            asyncio.create_task(self._cmd_revoke_async(chat_id, user_id, parts[1:]))
+            return
+        elif cmd == "/users":
+            asyncio.create_task(self._cmd_users_async(chat_id, user_id))
             return
 
         # Authorization check
@@ -373,8 +379,71 @@ class TelegramOddsBot:
         except ValueError:
             await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid User ID. Must be a numeric Telegram ID.", "HTML", False)
 
+    async def _cmd_revoke_async(self, chat_id: str | int, sender_id: str | int, args: list):
+        try:
+            is_admin = (int(sender_id) == DEFAULT_ADMIN_ID or int(chat_id) == DEFAULT_ADMIN_ID)
+        except (ValueError, TypeError):
+            is_admin = (sender_id == DEFAULT_ADMIN_ID or chat_id == DEFAULT_ADMIN_ID)
+
+        if not is_admin:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can revoke users.", "HTML", False)
+            return
+
+        if not args:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "⚠️ <b>Usage Syntax:</b> <code>/revoke &lt;user_id&gt;</code>\n"
+                "<i>Example:</i> <code>/revoke 123456789</code>",
+                "HTML", False
+            )
+            return
+
+        try:
+            target_user_id = int(args[0].strip())
+            if target_user_id == DEFAULT_ADMIN_ID:
+                await asyncio.to_thread(self.client.send_message, chat_id, "❌ Cannot revoke primary Admin access.", "HTML", False)
+                return
+
+            if target_user_id in ALLOWED_USERS:
+                ALLOWED_USERS.remove(target_user_id)
+                save_allowed_users(ALLOWED_USERS)
+
+            admin_msg = f"User {target_user_id} has been removed from allowed list."
+            await asyncio.to_thread(self.client.send_message, chat_id, admin_msg, "HTML", False)
+
+        except ValueError:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid User ID. Must be a numeric Telegram ID.", "HTML", False)
+
+    async def _cmd_users_async(self, chat_id: str | int, sender_id: str | int):
+        try:
+            is_admin = (int(sender_id) == DEFAULT_ADMIN_ID or int(chat_id) == DEFAULT_ADMIN_ID)
+        except (ValueError, TypeError):
+            is_admin = (sender_id == DEFAULT_ADMIN_ID or chat_id == DEFAULT_ADMIN_ID)
+
+        if not is_admin:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can view user list.", "HTML", False)
+            return
+
+        user_lines = []
+        for uid in sorted(ALLOWED_USERS):
+            admin_tag = " (Admin)" if uid == DEFAULT_ADMIN_ID else ""
+            user_lines.append(f"• <code>{uid}</code>{admin_tag}")
+
+        msg = (
+            f"👥 <b>AUTHORIZED USERS LIST</b>\n\n"
+            f"👑 <b>Admin ID:</b> <code>{DEFAULT_ADMIN_ID}</code>\n"
+            f"📊 <b>Total Authorized Users:</b> {len(ALLOWED_USERS)}\n\n"
+            + "\n".join(user_lines)
+        )
+        await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
+
     def _cmd_start(self, chat_id: str | int, user_id: Optional[str | int] = None):
-        admin_extra = "• <code>/allow &lt;user_id&gt;</code> — (Admin Only) Authorize a user for bot access\n" if (user_id and (user_id == DEFAULT_ADMIN_ID or str(user_id) == str(DEFAULT_ADMIN_ID))) else ""
+        admin_extra = (
+            "• <code>/allow &lt;user_id&gt;</code> — (Admin Only) Authorize a user for bot access\n"
+            "• <code>/revoke &lt;user_id&gt;</code> — (Admin Only) Revoke user authorization\n"
+            "• <code>/users</code> — (Admin Only) Display Admin ID and authorized users\n"
+        ) if (user_id and (user_id == DEFAULT_ADMIN_ID or str(user_id) == str(DEFAULT_ADMIN_ID))) else ""
         help_text = (
             "💰 <b>LIVE CRICKET ODDS ALERT & CASHOUT CALCULATOR BOT</b> ⚡\n\n"
             "Monitor live cricket exchange rates with an <b>automated Green Book Cashout Calculator</b>! "
