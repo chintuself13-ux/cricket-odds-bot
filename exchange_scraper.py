@@ -220,20 +220,23 @@ class ExchangeScraperEngine:
                 fav_back = round(1.0 + (p_back / 100.0), 2)
                 fav_lay = round(1.0 + (p_lay / 100.0), 2)
             else:
-                fav_back, fav_lay = 1.12, 1.13
+                fav_back, fav_lay = None, None
 
-            # Calculate underdog odds dynamically from favorite odds (no static/cached rates)
-            if fav_back <= 1.12:
-                dog_back, dog_lay = 8.50, 9.00
-            else:
-                fav_prob = 1.0 / max(1.01, fav_lay)
-                dog_prob_back = max(0.02, 1.0 - fav_prob - 0.003)
-                dog_prob_lay = max(0.02, 1.0 - (1.0 / max(1.01, fav_back)) + 0.008)
+            if fav_back is None:
+                if not t1_override and not t2_override:
+                    return None
+                fav_back = t1_override or t2_override or 1.12
+                fav_lay = round(fav_back + 0.01, 2)
 
-                dog_back = round(1.0 / dog_prob_back, 2)
-                dog_lay = round(1.0 / dog_prob_lay, 2)
-                if dog_lay <= dog_back:
-                    dog_lay = round(dog_back + 0.50, 2)
+            # Calculate underdog odds dynamically from favorite odds
+            fav_prob = 1.0 / max(1.01, fav_lay)
+            dog_prob_back = max(0.02, 1.0 - fav_prob - 0.003)
+            dog_prob_lay = max(0.02, 1.0 - (1.0 / max(1.01, fav_back)) + 0.008)
+
+            dog_back = round(1.0 / dog_prob_back, 2)
+            dog_lay = round(1.0 / dog_prob_lay, 2)
+            if dog_lay <= dog_back:
+                dog_lay = round(dog_back + 0.50, 2)
 
             if "zim" in team1.lower():
                 t1_back = t1_override or dog_back
@@ -338,11 +341,21 @@ class ExchangeScraperEngine:
                         "match_title": m.get("title")
                     }
 
-        default_odd = override if override else (8.50 if "zim" in target_lower else 1.12)
+        if override:
+            return {
+                "target_team": self._clean_team_name(team_name),
+                "target_odd": override,
+                "target_lay": round(override + 0.05, 2),
+                "opponent_team": None,
+                "opponent_odd": None,
+                "opponent_lay": None,
+                "match_title": None
+            }
+
         return {
             "target_team": self._clean_team_name(team_name),
-            "target_odd": default_odd,
-            "target_lay": round(default_odd + 0.05, 2),
+            "target_odd": None,
+            "target_lay": None,
             "opponent_team": None,
             "opponent_odd": None,
             "opponent_lay": None,
