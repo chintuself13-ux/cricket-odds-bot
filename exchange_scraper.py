@@ -29,6 +29,24 @@ TEAM_ABBREVIATIONS = {
     "UGN": "Uganda",
     "BOT": "Botswana",
     "BOTS": "Botswana",
+    "HAM": "Hampshire",
+    "SUR": "Surrey",
+    "BT": "Barbados",
+    "SOM": "Somerset",
+    "WAR": "Warwickshire",
+    "LAN": "Lancashire",
+    "YOR": "Yorkshire",
+    "NOT": "Nottinghamshire",
+    "DUR": "Durham",
+    "ESS": "Essex",
+    "GLAM": "Glamorgan",
+    "GLOUC": "Gloucestershire",
+    "KENT": "Kent",
+    "LEIC": "Leicestershire",
+    "MIDD": "Middlesex",
+    "NOR": "Northamptonshire",
+    "SUS": "Sussex",
+    "WORC": "Worcestershire",
 }
 
 def convert_paresh_to_decimal(val: float) -> float:
@@ -592,22 +610,34 @@ class ExchangeScraperEngine:
         return cleaned
 
     @staticmethod
-    def _normalize_team(name: str) -> str:
-        return ExchangeScraperEngine._clean_team_name(name)
+    def _strip_team_suffixes(s: str) -> str:
+        if not s:
+            return ""
+        t = s.lower().strip()
+        # Remove parentheses noise (e.g. '(FAV)')
+        t = re.sub(r'\(.*?\)', '', t)
+        # Remove common sports suffixes: U19, WOMEN, MEN, ELIMINATOR, FAV, W, XI, SQUAD, TEAM
+        t = re.sub(r'[\s\-]+(u19|under[\s\-]*19|women|men|eliminator|fav|xi|squad|team)\b', '', t, flags=re.IGNORECASE)
+        # Remove trailing -w, -W, w, W, e.g. "ham-w" -> "ham", "bt-w" -> "bt", "surrey-w" -> "surrey"
+        t = re.sub(r'[\s\-]w$', '', t, flags=re.IGNORECASE)
+        t = re.sub(r'\bw$', '', t, flags=re.IGNORECASE)
+        return t.strip()
 
     @staticmethod
     def _is_strict_team_match(query: str, target: str) -> bool:
         """
-        Strictly verifies that query team matches target team row.
-        Prevents partial word confusion (e.g. 'ENGLAND U19' vs 'PAKISTAN U19').
+        Relaxed & Smart Team Name Matching with Abbreviation and Substring Mapping.
+        Matches "SURREY" with "Surrey Women Eliminator", "Ham" with "Ham-w", "BT" with "Bt-w".
+        Guards against cross-country leaks and U19/senior mismatch when explicitly specified.
         """
         if not query or not target:
             return False
 
-        q = query.lower().strip()
-        t = target.lower().strip()
+        q_raw = query.strip()
+        t_raw = target.strip()
 
-        if q == t:
+        # 1. Exact string match (case-insensitive)
+        if q_raw.lower() == t_raw.lower():
             return True
 
         q_clean = ExchangeScraperEngine._clean_team_name(query).lower()
@@ -616,40 +646,87 @@ class ExchangeScraperEngine:
         if q_clean == t_clean:
             return True
 
-        # Check age group / squad identifiers like U19 / U23 / Women
-        q_has_u19 = "u19" in q or "under 19" in q or "u-19" in q
-        t_has_u19 = "u19" in t or "under 19" in t or "u-19" in t
+        # 2. Country Cross-Leak Prevention Guard
+        countries = {
+            "england", "pakistan", "india", "australia", "zimbabwe", "sri lanka",
+            "south africa", "new zealand", "west indies", "bangladesh", "afghanistan",
+            "uganda", "botswana", "barbados", "jamaica"
+        }
+        q_words_raw = set(re.split(r'\W+', q_clean))
+        t_words_raw = set(re.split(r'\W+', t_clean))
 
-        if q_has_u19 != t_has_u19:
-            return False
-
-        q_words = [w for w in re.split(r'\W+', q_clean) if w]
-        t_words = [w for w in re.split(r'\W+', t_clean) if w]
-
-        if not q_words or not t_words:
-            return False
-
-        countries = {"england", "pakistan", "india", "australia", "zimbabwe", "sri lanka", "south africa", "new zealand", "west indies", "bangladesh", "afghanistan", "uganda", "botswana", "barbados", "jamaica"}
-        q_countries = {w for w in q_words if w in countries}
-        t_countries = {w for w in t_words if w in countries}
+        q_countries = {w for w in q_words_raw if w in countries}
+        t_countries = {w for w in t_words_raw if w in countries}
 
         if q_countries and t_countries and q_countries != t_countries:
             return False
 
-        matching_words = set(q_words).intersection(set(t_words))
-        if len(matching_words) >= min(len(q_words), len(t_words)) and len(matching_words) > 0:
+        # 3. Explicit Age Group Guard (U19 vs Senior)
+        q_has_u19 = "u19" in q_raw.lower() or "under 19" in q_raw.lower() or "u-19" in q_raw.lower()
+        t_has_u19 = "u19" in t_raw.lower() or "under 19" in t_raw.lower() or "u-19" in t_raw.lower()
+        if q_has_u19 != t_has_u19:
+            return False
+
+        # 4. Strip suffixes to compare base team stems
+        q_stem = ExchangeScraperEngine._strip_team_suffixes(q_clean)
+        t_stem = ExchangeScraperEngine._strip_team_suffixes(t_clean)
+
+        if q_stem and t_stem:
+            if q_stem == t_stem:
+                return True
+
+            # Substring / startswith / contains check on base stems
+            if q_stem in t_stem or t_stem in q_stem:
+                return True
+            if q_stem.startswith(t_stem) or t_stem.startswith(q_stem):
+                return True
+
+        # 5. Raw Substring / startswith / contains check
+        q_lower = q_raw.lower()
+        t_lower = t_raw.lower()
+        if q_lower in t_lower or t_lower in q_lower:
+            return True
+        if q_clean in t_clean or t_clean in q_clean:
             return True
 
-        return ExchangeScraperEngine._check_alias_match(q_clean, t_clean)
+        # 6. Abbreviation & Alias Mapping
+        if ExchangeScraperEngine._check_alias_match(q_raw, t_raw) or ExchangeScraperEngine._check_alias_match(q_clean, t_clean):
+            return True
+
+        # 7. Word set intersection check (for multi-word teams)
+        q_words = [w for w in re.split(r'\W+', q_stem or q_clean) if len(w) >= 2]
+        t_words = [w for w in re.split(r'\W+', t_stem or t_clean) if len(w) >= 2]
+
+        if q_words and t_words:
+            matching = set(q_words).intersection(set(t_words))
+            if len(matching) >= min(len(q_words), len(t_words)) and len(matching) > 0:
+                return True
+
+        return False
 
     @staticmethod
     def _check_alias_match(query: str, target: str) -> bool:
         q = query.upper()
         t = target.upper()
-        if q in TEAM_ABBREVIATIONS and TEAM_ABBREVIATIONS[q].upper() in t:
-            return True
-        if t in TEAM_ABBREVIATIONS and TEAM_ABBREVIATIONS[t].upper() in q:
-            return True
+
+        q_stem = ExchangeScraperEngine._strip_team_suffixes(q)
+        t_stem = ExchangeScraperEngine._strip_team_suffixes(t)
+
+        for k, v in TEAM_ABBREVIATIONS.items():
+            k_u = k.upper()
+            v_u = v.upper()
+
+            # If query equals or starts with abbreviation
+            if q == k_u or q_stem == k_u or q.startswith(k_u):
+                if v_u in t or v_u in t_stem or k_u in t or k_u in t_stem or t.startswith(k_u.lower()):
+                    return True
+            # If target equals or starts with abbreviation
+            if t == k_u or t_stem == k_u or t.startswith(k_u):
+                if v_u in q or v_u in q_stem or k_u in q or k_u in q_stem or q.startswith(k_u.lower()):
+                    return True
+            # General abbreviation / name cross match
+            if (k_u in q or v_u in q) and (k_u in t or v_u in t):
+                return True
         return False
 
 global_exchange_scraper = ExchangeScraperEngine()
