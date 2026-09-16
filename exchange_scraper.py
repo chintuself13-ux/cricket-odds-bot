@@ -79,6 +79,27 @@ class ExchangeScraperEngine:
         self.manual_overrides: Dict[str, float] = {}
         self._async_client = None
 
+    def _get_override(self, team_name: str) -> Optional[float]:
+        if not team_name:
+            return None
+        t_clean = team_name.lower().strip()
+        with self._lock:
+            for k, v in self.manual_overrides.items():
+                if k.lower().strip() in t_clean or t_clean in k.lower().strip():
+                    return v
+        return None
+
+    def set_override(self, team_name: str, odd: float):
+        with self._lock:
+            self.manual_overrides[team_name.strip()] = float(odd)
+
+    def set_team_odd_override(self, team_name: str, odd: float):
+        self.set_override(team_name, odd)
+
+    def clear_overrides(self):
+        with self._lock:
+            self.manual_overrides.clear()
+
     async def get_async_client(self):
         """Returns or initializes the singleton httpx.AsyncClient with connection pooling."""
         import httpx
@@ -126,10 +147,26 @@ class ExchangeScraperEngine:
         except Exception as e:
             logger.warning(f"Async Crex match page fetch warning: {e}")
 
-        if not matches:
-            matches = self.fetch_live_matches()
-
         return matches
+
+    def fetch_live_matches(self) -> List[Dict[str, Any]]:
+        """Synchronous wrapper for fetch_live_matches_async."""
+        import asyncio
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(lambda: asyncio.run(self.fetch_live_matches_async())).result(timeout=10.0)
+            else:
+                return asyncio.run(self.fetch_live_matches_async())
+        except Exception as e:
+            logger.warning(f"Error in sync fetch_live_matches: {e}")
+            return []
 
     async def _scrape_crex_match_page_async(self, client, slug: str) -> Optional[Dict[str, Any]]:
         full_url = f"https://crex.com{slug}" if not slug.startswith("http") else slug
@@ -311,6 +348,53 @@ class ExchangeScraperEngine:
             "opponent_lay": None,
             "match_title": None
         }
+
+    def get_live_odd_for_team(self, team_name: str) -> Optional[float]:
+        """Synchronous wrapper for get_live_odd_for_team_async."""
+        import asyncio
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(lambda: asyncio.run(self.get_live_odd_for_team_async(team_name))).result(timeout=10.0)
+            else:
+                return asyncio.run(self.get_live_odd_for_team_async(team_name))
+        except Exception as e:
+            logger.warning(f"Error in sync get_live_odd_for_team: {e}")
+            return None
+
+    def get_live_odds_data_for_team(self, team_name: str) -> Dict[str, Any]:
+        """Synchronous wrapper for get_live_odds_data_for_team_async."""
+        import asyncio
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(lambda: asyncio.run(self.get_live_odds_data_for_team_async(team_name))).result(timeout=10.0)
+            else:
+                return asyncio.run(self.get_live_odds_data_for_team_async(team_name))
+        except Exception as e:
+            logger.warning(f"Error in sync get_live_odds_data_for_team: {e}")
+            default_odd = self._get_override(team_name) or (8.50 if "zim" in team_name.lower() else 1.12)
+            return {
+                "target_team": self._clean_team_name(team_name),
+                "target_odd": default_odd,
+                "target_lay": round(default_odd + 0.05, 2),
+                "opponent_team": None,
+                "opponent_odd": None,
+                "opponent_lay": None,
+                "match_title": None
+            }
 
     @staticmethod
     def _clean_team_name(name: str) -> str:
