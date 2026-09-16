@@ -1187,22 +1187,32 @@ class TelegramOddsBot:
         team_filter = args[0].lower().strip() if args else None
         
         removed = []
-        if chat_id in ACTIVE_TRACKS or str(chat_id) in ACTIVE_TRACKS:
-            key = chat_id if chat_id in ACTIVE_TRACKS else str(chat_id)
-            data = ACTIVE_TRACKS[key]
-            team_name = data.get("team", data.get("team_name", ""))
-            if team_filter is None or team_filter in str(team_name).lower():
-                removed.append(str(team_name))
-                del ACTIVE_TRACKS[key]
-                save_active_jobs(ACTIVE_TRACKS)
-                if str(key) in self.tracking_tasks:
-                    self.tracking_tasks[str(key)].cancel()
-                    del self.tracking_tasks[str(key)]
+        keys_to_clear = []
+        for key, data in list(ACTIVE_TRACKS.items()):
+            if str(key) == str(chat_id) or key == chat_id:
+                team_name = data.get("team", data.get("team_name", ""))
+                if team_filter is None or team_filter in str(team_name).lower():
+                    removed.append(str(team_name))
+                    keys_to_clear.append(key)
 
+        for key in keys_to_clear:
+            if key in ACTIVE_TRACKS:
+                del ACTIVE_TRACKS[key]
+            task_key = str(key)
+            if task_key in self.tracking_tasks:
+                self.tracking_tasks[task_key].cancel()
+                del self.tracking_tasks[task_key]
+
+        save_active_jobs(ACTIVE_TRACKS)
         self.engine.remove_track(chat_id, team_filter)
 
         if removed:
-            await asyncio.to_thread(self.client.send_message, chat_id, f"⏹ <b>Stopped tracking for:</b> {', '.join(removed)}", "HTML", False)
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                f"🛑 <b>SIREN ALARM STOPPED & TRACKING ENDED!</b>\nCleared active tracking session for: <b>{', '.join(removed)}</b>",
+                "HTML", False
+            )
         else:
             await asyncio.to_thread(self.client.send_message, chat_id, "ℹ️ No matching active tracks found to stop.", "HTML", False)
 

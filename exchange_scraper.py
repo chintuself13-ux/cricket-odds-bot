@@ -237,8 +237,19 @@ class ExchangeScraperEngine:
             t1_override = self._get_override(team1)
             t2_override = self._get_override(team2)
 
-            # Parse live R field (Paresh rate) from Crex getSV3 live JSON state
+            # 1. Parse live R field (Paresh rate) and favorite team indicator from Crex live JSON state
             r_match = re.search(r'"R"\s*:\s*"(\d+)\+(\d+)"', clean_html)
+            
+            # Detect favorite team from Crex JSON state
+            fav_team_num = 1
+            fav_match = re.search(r'"(?:favTeam|fav|fTeam|favorite)"\s*:\s*"?(1|2|team1|team2|t1|t2)"?', clean_html, re.IGNORECASE)
+            if fav_match:
+                val = fav_match.group(1).lower()
+                if "2" in val or "t2" in val:
+                    fav_team_num = 2
+                else:
+                    fav_team_num = 1
+
             if r_match:
                 p_back = float(r_match.group(1))
                 offset = float(r_match.group(2))
@@ -264,7 +275,8 @@ class ExchangeScraperEngine:
             if dog_lay <= dog_back:
                 dog_lay = round(dog_back + 0.50, 2)
 
-            if "zim" in team1.lower():
+            # Strictly assign favourite & underdog rates according to fav_team_num
+            if fav_team_num == 2:
                 t1_back = t1_override or dog_back
                 t1_lay = round(t1_back + 0.50, 2)
                 t2_back = t2_override or fav_back
@@ -324,7 +336,6 @@ class ExchangeScraperEngine:
             return None
 
     async def get_live_odd_for_team_async(self, team_name: str) -> Optional[float]:
-        target_lower = team_name.lower().strip()
         override = self._get_override(team_name)
         if override:
             return override
@@ -332,22 +343,21 @@ class ExchangeScraperEngine:
         matches = await self.fetch_live_matches_async()
         for m in matches:
             for outcome in m["odds"]:
-                name = outcome["name"].lower().strip()
-                if target_lower in name or name in target_lower or self._check_alias_match(target_lower, name):
+                name = outcome["name"]
+                if self._is_strict_team_match(team_name, name):
                     return outcome["back"]
 
         return None
 
     async def get_live_odds_data_for_team_async(self, team_name: str) -> Dict[str, Any]:
-        target_lower = team_name.lower().strip()
         override = self._get_override(team_name)
 
         matches = await self.fetch_live_matches_async()
         for m in matches:
             odds = m.get("odds", [])
             for idx, outcome in enumerate(odds):
-                name = outcome["name"].lower().strip()
-                if target_lower in name or name in target_lower or self._check_alias_match(target_lower, name):
+                name = outcome["name"]
+                if self._is_strict_team_match(team_name, name):
                     target_team = outcome["name"]
                     target_odd = override if override else outcome["back"]
                     target_lay = outcome.get("lay")
@@ -441,6 +451,10 @@ class ExchangeScraperEngine:
             return ""
         # Strip HTML tags
         s = re.sub(r'<[^>]+>', '', name)
+
+        # Standardize age group descriptors (e.g. Under 19 -> U19, Under 23 -> U23)
+        s = re.sub(r'\bunder[\s\-]*19\b', 'U19', s, flags=re.IGNORECASE)
+        s = re.sub(r'\bunder[\s\-]*23\b', 'U23', s, flags=re.IGNORECASE)
         
         # Cut off at live score patterns (e.g. 119-8, 18-1, 0-0, 20.0) or commentary markers
         s = re.split(
@@ -474,6 +488,53 @@ class ExchangeScraperEngine:
     @staticmethod
     def _normalize_team(name: str) -> str:
         return ExchangeScraperEngine._clean_team_name(name)
+
+    @staticmethod
+    def _is_strict_team_match(query: str, target: str) -> bool:
+        """
+        Strictly verifies that query team matches target team row.
+        Prevents partial word confusion (e.g. 'ENGLAND U19' vs 'PAKISTAN U19').
+        """
+        if not query or not target:
+            return False
+
+        q = query.lower().strip()
+        t = target.lower().strip()
+
+        if q == t:
+            return True
+
+        q_clean = ExchangeScraperEngine._clean_team_name(query).lower()
+        t_clean = ExchangeScraperEngine._clean_team_name(target).lower()
+
+        if q_clean == t_clean:
+            return True
+
+        # Check age group / squad identifiers like U19 / U23 / Women
+        q_has_u19 = "u19" in q or "under 19" in q or "u-19" in q
+        t_has_u19 = "u19" in t or "under 19" in t or "u-19" in t
+
+        if q_has_u19 != t_has_u19:
+            return False
+
+        q_words = [w for w in re.split(r'\W+', q_clean) if w]
+        t_words = [w for w in re.split(r'\W+', t_clean) if w]
+
+        if not q_words or not t_words:
+            return False
+
+        countries = {"england", "pakistan", "india", "australia", "zimbabwe", "sri lanka", "south africa", "new zealand", "west indies", "bangladesh", "afghanistan", "uganda", "botswana", "barbados", "jamaica"}
+        q_countries = {w for w in q_words if w in countries}
+        t_countries = {w for w in t_words if w in countries}
+
+        if q_countries and t_countries and q_countries != t_countries:
+            return False
+
+        matching_words = set(q_words).intersection(set(t_words))
+        if len(matching_words) >= min(len(q_words), len(t_words)) and len(matching_words) > 0:
+            return True
+
+        return ExchangeScraperEngine._check_alias_match(q_clean, t_clean)
 
     @staticmethod
     def _check_alias_match(query: str, target: str) -> bool:
