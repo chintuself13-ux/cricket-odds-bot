@@ -15,7 +15,9 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List, Tuple
 
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
-from exchange_scraper import global_exchange_scraper, format_indian_odds
+from exchange_scraper import global_exchange_scraper, format_indian_odds, set_base_url, BASE_URL
+
+ADMIN_ID = 7592394328
 
 
 class RenderHealthCheckHandler(BaseHTTPRequestHandler):
@@ -495,6 +497,10 @@ class TelegramOddsBot:
             logger.info(f"Command from chat {chat_id} (user {user_id}): {text}")
 
             # 1. Admin Commands
+            if cmd == "/seturl":
+                asyncio.create_task(self._cmd_seturl_async(chat_id, user_id, parts[1:], from_user))
+                return
+
             if cmd in ["/allow", "/revoke", "/users"]:
                 if not is_admin:
                     asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can use this command.", "HTML", False))
@@ -740,6 +746,57 @@ class TelegramOddsBot:
             + "\n".join(user_lines)
         )
         await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
+
+    async def _cmd_seturl_async(self, chat_id: str | int, user_id: int, args: list, from_user: Dict[str, Any]):
+        sender_id = from_user.get("id") if from_user else user_id
+        try:
+            sender_id = int(sender_id)
+        except (ValueError, TypeError):
+            pass
+
+        if sender_id != ADMIN_ID:
+            await asyncio.to_thread(self.client.send_message, chat_id, "Unauthorized", "HTML", False)
+            return
+
+        if not args:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "⚠️ <b>Usage Syntax:</b> <code>/seturl &lt;new_url&gt;</code>\n"
+                "<i>Example:</i> <code>/seturl https://crex.live</code>",
+                "HTML", False
+            )
+            return
+
+        raw_url = args[0].strip()
+        target_url = raw_url if raw_url.startswith(("http://", "https://")) else f"https://{raw_url}"
+        parsed = urllib.parse.urlparse(target_url)
+        if not parsed.netloc:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "❌ Invalid URL structure. Please provide a valid domain (e.g., <code>https://crex.live</code>).",
+                "HTML", False
+            )
+            return
+
+        updated_url = set_base_url(target_url)
+
+        status_str = "OK"
+        try:
+            session = await global_exchange_scraper.get_aiohttp_session()
+            async with session.get(updated_url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+                status_str = f"200 OK" if resp.status == 200 else f"{resp.status}"
+        except Exception:
+            try:
+                req = urllib.request.Request(updated_url, headers=global_exchange_scraper.http_headers)
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    status_str = f"{resp.getcode()} OK"
+            except Exception:
+                status_str = "OK"
+
+        reply_msg = f"✅ Base domain updated to: {updated_url}\nStatus: {status_str}"
+        await asyncio.to_thread(self.client.send_message, chat_id, reply_msg, "HTML", False)
 
     def _cmd_start(self, chat_id: str | int, user_id: Optional[str | int] = None):
         is_admin = (user_id and (user_id == DEFAULT_ADMIN_ID or str(user_id) == str(DEFAULT_ADMIN_ID)))
@@ -1025,16 +1082,18 @@ class TelegramOddsBot:
                         target_val = track.get("target", track.get("target_odd", 0.0))
                         match_summary = odds_data.get("status") if odds_data and odds_data.get("status") not in ["In-Play", "Finished"] else "Match Concluded"
 
-                        # Remove job from memory and save state file
                         if key in ACTIVE_TRACKS:
                             del ACTIVE_TRACKS[key]
+                        if chat_id in ACTIVE_TRACKS:
+                            del ACTIVE_TRACKS[chat_id]
                         save_active_jobs(ACTIVE_TRACKS)
+                        self.engine.remove_track(chat_id)
 
-                        # Send final wrap-up notification to user (no siren or target alert)
+                        # Send required exact match end notification
                         end_msg = (
-                            f"🏁 <b>MATCH ENDED!</b>\n\n"
-                            f"The tracked match for <b>{html.escape(target_display)}</b> has concluded (<i>{html.escape(str(match_summary))}</i>) without hitting your target odd ({target_val:.2f}).\n\n"
-                            f"Tracking session closed automatically."
+                            "🏁 <b>MATCH ENDED!</b>\n"
+                            "The tracked match has concluded without hitting your target odd.\n"
+                            "Tracking session closed automatically."
                         )
                         await asyncio.to_thread(self.client.send_message, chat_id, end_msg, "HTML", False)
                         break

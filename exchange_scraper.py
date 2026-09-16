@@ -12,6 +12,23 @@ from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger("ExchangeScraper")
 
+BASE_URL = "https://crex.live"
+
+def set_base_url(new_url: str) -> str:
+    """
+    Safely updates global BASE_URL and normalizes URL structure.
+    Modifies all scraping endpoints to use it dynamically via urllib.parse.urljoin.
+    """
+    global BASE_URL
+    if not new_url:
+        return BASE_URL
+    url_str = new_url.strip()
+    if not (url_str.startswith("http://") or url_str.startswith("https://")):
+        url_str = "https://" + url_str
+    BASE_URL = url_str.rstrip("/")
+    logger.info(f"Scraper BASE_URL updated dynamically to: {BASE_URL}")
+    return BASE_URL
+
 TEAM_ABBREVIATIONS = {
     "AUS": "Australia",
     "ZIM": "Zimbabwe",
@@ -30,8 +47,11 @@ TEAM_ABBREVIATIONS = {
     "BOT": "Botswana",
     "BOTS": "Botswana",
     "HAM": "Hampshire",
+    "HAM-W": "Hampshire Women",
     "SUR": "Surrey",
+    "SUR-W": "Surrey Women",
     "BT": "Barbados",
+    "BT-W": "Barbados Women",
     "SOM": "Somerset",
     "WAR": "Warwickshire",
     "LAN": "Lancashire",
@@ -169,7 +189,7 @@ class ExchangeScraperEngine:
         """
         Asynchronously fetches live match data using persistent aiohttp.ClientSession connection pool.
         """
-        url = "https://crex.com/cricket-live-score"
+        url = urllib.parse.urljoin(BASE_URL, "/cricket-live-score")
         try:
             html_data = await self._fetch_url_text(url)
             if not html_data:
@@ -212,7 +232,7 @@ class ExchangeScraperEngine:
             return []
 
     async def _scrape_crex_match_page_async(self, slug: str) -> Optional[Dict[str, Any]]:
-        full_url = f"https://crex.com{slug}" if not slug.startswith("http") else slug
+        full_url = urllib.parse.urljoin(BASE_URL, slug) if not slug.startswith("http") else slug
         
         try:
             raw_html = await self._fetch_url_text(full_url)
@@ -255,13 +275,13 @@ class ExchangeScraperEngine:
             t1_override = self._get_override(team1)
             t2_override = self._get_override(team2)
 
-            # 1. Match status & completion detection (Scoped to header / scoreboard container & JSON state only)
+            # 1. Match status & completion detection (Scoped strictly to main match header / scoreboard container & JSON state only)
             is_finished = False
             status_text = "In-Play"
 
             # Extract header status elements & JSON status string (do NOT search whole page text)
             header_status_match = re.search(
-                r'class="[^"]*(?:match-status|live-status|status-text|header-status|result-text)[^"]*"[^>]*>\s*([^<]+?)\s*</',
+                r'class="[^"]*(?:match-status|live-status|status-text|header-status|result-text|scoreboard-status|match-header)[^"]*"[^>]*>\s*([^<]+?)\s*</',
                 clean_html,
                 re.IGNORECASE
             )
@@ -270,17 +290,24 @@ class ExchangeScraperEngine:
                 clean_html,
                 re.IGNORECASE
             )
+            scoreboard_container_match = re.search(
+                r'<div[^>]*class="[^"]*(?:match-header|scoreboard|match-info|score-card|live-score-hdr)[^"]*"[^>]*>(.*?)</div>',
+                clean_html,
+                re.IGNORECASE | re.DOTALL
+            )
 
             header_str = ""
             if header_status_match:
                 header_str += " " + header_status_match.group(1)
             if json_status_match:
                 header_str += " " + json_status_match.group(1)
-            if title_m and ("won by" in title_m.group(1).lower() or "match ended" in title_m.group(1).lower()):
+            if scoreboard_container_match:
+                header_str += " " + re.sub(r'<[^>]+>', ' ', scoreboard_container_match.group(1))
+            if title_m and any(kw in title_m.group(1).lower() for kw in ["won by", "concluded", "abandoned", "no result"]):
                 header_str += " " + title_m.group(1)
 
-            # Strict finished match completion patterns (no loose "result" or "closed" keywords)
-            strict_finished_pattern = r'\b(won by|match ended|match finished|match abandoned|no result|match tied)\b'
+            # Strict finished match completion patterns restricted exclusively to match header/scoreboard container
+            strict_finished_pattern = r'\b(won by|concluded|abandoned|no result|match ended|match finished|match tied)\b'
             if re.search(strict_finished_pattern, header_str, re.IGNORECASE):
                 is_finished = True
                 status_text = header_str.strip()
@@ -291,6 +318,7 @@ class ExchangeScraperEngine:
             # GUARD ACTIVE ODDS: If live R field or odds exist, match is definitely LIVE!
             if r_match:
                 is_finished = False
+                status_text = "In-Play"
             
             # Detect favorite team from Crex JSON state
             fav_team_num = 1
@@ -431,6 +459,10 @@ class ExchangeScraperEngine:
         target_clean = self._clean_team_name(team_name).upper()
 
         matches = await self.fetch_live_matches_async()
+        
+        best_candidate = None
+        best_score = 0
+
         for m in matches:
             odds = m.get("odds", [])
             is_finished = m.get("is_finished", False)
@@ -438,7 +470,8 @@ class ExchangeScraperEngine:
 
             for idx, outcome in enumerate(odds):
                 name = outcome["name"]
-                if self._is_strict_team_match(team_name, name):
+                score = self._score_team_match(team_name, name)
+                if score > best_score:
                     matched_key = name.upper()
                     # Cross-team leak prevention guard
                     if ("PAKISTAN" in matched_key and "ENGLAND" in target_clean) or \
@@ -446,17 +479,7 @@ class ExchangeScraperEngine:
                        ("INDIA" in matched_key and "AUSTRALIA" in target_clean) or \
                        ("AUSTRALIA" in matched_key and "INDIA" in target_clean):
                         logger.warning(f"Cross-team leak prevented! Attempted to assign {matched_key} odds to target {target_clean}")
-                        return {
-                            "target_team": target_clean,
-                            "target_odd": None,
-                            "target_lay": None,
-                            "opponent_team": None,
-                            "opponent_odd": None,
-                            "opponent_lay": None,
-                            "match_title": m.get("title"),
-                            "is_finished": is_finished,
-                            "status": match_status
-                        }
+                        continue
 
                     target_team = outcome["name"]
                     target_odd = override if override else outcome.get("back")
@@ -472,7 +495,8 @@ class ExchangeScraperEngine:
                     opponent_odd = opponent_outcome["back"] if opponent_outcome else None
                     opponent_lay = opponent_outcome.get("lay") if opponent_outcome else None
 
-                    return {
+                    best_score = score
+                    best_candidate = {
                         "target_team": target_team,
                         "target_odd": target_odd,
                         "target_lay": target_lay,
@@ -485,11 +509,15 @@ class ExchangeScraperEngine:
                     }
 
             # Check if match is finished even if odds array is empty
-            home_t = m.get("home_team", "")
-            away_t = m.get("away_team", "")
-            if self._is_strict_team_match(team_name, home_t) or self._is_strict_team_match(team_name, away_t):
-                if is_finished:
-                    return {
+            if best_candidate is None:
+                home_t = m.get("home_team", "")
+                away_t = m.get("away_team", "")
+                h_score = self._score_team_match(team_name, home_t)
+                a_score = self._score_team_match(team_name, away_t)
+                max_score = max(h_score, a_score)
+                if max_score > 0 and is_finished:
+                    best_score = max_score
+                    best_candidate = {
                         "target_team": target_clean,
                         "target_odd": None,
                         "target_lay": None,
@@ -500,6 +528,9 @@ class ExchangeScraperEngine:
                         "is_finished": True,
                         "status": match_status
                     }
+
+        if best_candidate:
+            return best_candidate
 
         if override:
             return {
@@ -577,8 +608,8 @@ class ExchangeScraperEngine:
         s = re.sub(r'<[^>]+>', '', name)
 
         # Standardize age group descriptors (e.g. Under 19 -> U19, Under 23 -> U23)
-        s = re.sub(r'\bunder[\s\-]*19\b', 'U19', s, flags=re.IGNORECASE)
-        s = re.sub(r'\bunder[\s\-]*23\b', 'U23', s, flags=re.IGNORECASE)
+        s = re.sub(r'\bunder[\s\-]*19s?\b', 'U19', s, flags=re.IGNORECASE)
+        s = re.sub(r'\bunder[\s\-]*23s?\b', 'U23', s, flags=re.IGNORECASE)
         
         # Cut off at live score patterns (e.g. 119-8, 18-1, 0-0, 20.0) or commentary markers
         s = re.split(
@@ -622,6 +653,48 @@ class ExchangeScraperEngine:
         t = re.sub(r'[\s\-]w$', '', t, flags=re.IGNORECASE)
         t = re.sub(r'\bw$', '', t, flags=re.IGNORECASE)
         return t.strip()
+
+    @staticmethod
+    def _score_team_match(query: str, target: str) -> int:
+        """
+        Returns a priority score (> 0) for matching query against target team/card.
+        Prioritizes exact card tokens, stem matches, and gender alignment.
+        Disambiguates Hampshire Men vs Hampshire Women without misrouting odds.
+        """
+        if not query or not target:
+            return 0
+
+        q_raw = query.strip()
+        t_raw = target.strip()
+
+        # 1. Exact string match (case insensitive) -> Highest Priority
+        if q_raw.lower() == t_raw.lower():
+            return 1000
+
+        # Gender indicator check
+        q_women = bool(re.search(r'[\s\-]w\b|\bwomen\b|\bfemale\b', q_raw, re.IGNORECASE))
+        t_women = bool(re.search(r'[\s\-]w\b|\bwomen\b|\bfemale\b', t_raw, re.IGNORECASE))
+        q_men = bool(re.search(r'\bmen\b|\bmale\b', q_raw, re.IGNORECASE))
+        t_men = bool(re.search(r'\bmen\b|\bmale\b', t_raw, re.IGNORECASE))
+
+        # Disqualify cross-gender mismatch (e.g., Hampshire Men vs Hampshire Women)
+        if q_women and (t_men or (not t_women and "men" in t_raw.lower())):
+            return 0
+        if q_men and t_women:
+            return 0
+
+        # Exact match-card token check (e.g. "Ham-w", "Bt-w", "England U19")
+        if ExchangeScraperEngine._is_strict_team_match(q_raw, t_raw):
+            score = 500
+            if q_women == t_women:
+                score += 200
+            q_clean = ExchangeScraperEngine._clean_team_name(q_raw).lower()
+            t_clean = ExchangeScraperEngine._clean_team_name(t_raw).lower()
+            if q_clean == t_clean:
+                score += 150
+            return score
+
+        return 0
 
     @staticmethod
     def _is_strict_team_match(query: str, target: str) -> bool:
