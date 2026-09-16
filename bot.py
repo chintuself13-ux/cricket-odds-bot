@@ -836,15 +836,16 @@ class TelegramOddsBot:
         last_alert_time = 0.0
 
         while self.running and (chat_id in ACTIVE_TRACKS or str(chat_id) in ACTIVE_TRACKS):
-            key = chat_id if chat_id in ACTIVE_TRACKS else str(chat_id)
-            track = ACTIVE_TRACKS[key]
-            team_name = track.get("team") or track.get("team_name")
-
             try:
-                odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
-                latest_odd = odds_data.get("target_odd")
+                key = chat_id if chat_id in ACTIVE_TRACKS else str(chat_id)
+                track = ACTIVE_TRACKS[key]
+                team_name = track.get("team") or track.get("team_name")
 
-                if latest_odd is not None:
+                # 1. Fetch live odds
+                odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
+                latest_odd = odds_data.get("target_odd") if odds_data else None
+
+                if latest_odd is not None and isinstance(latest_odd, (int, float)) and latest_odd > 1.0:
                     track["current_odd"] = latest_odd
                     track["last_seen_odd"] = latest_odd
                     if odds_data.get("opponent_team"):
@@ -855,7 +856,10 @@ class TelegramOddsBot:
                     if track.get("entry") is None or not isinstance(track.get("entry"), (int, float)):
                         track["entry"] = latest_odd
                         track["entry_odd"] = latest_odd
+                else:
+                    logger.info(f"Transient empty odds response for chat {chat_id} ({team_name}). Maintaining active tracking state.")
 
+                # 2. Check threshold trigger and maintain ACTIVE state on normal ticks
                 curr = track.get("current_odd")
                 target_val = track.get("target", track.get("target_odd", 0.0))
 
@@ -901,7 +905,9 @@ class TelegramOddsBot:
                     last_alert_time = 0.0
 
             except Exception as e:
-                logger.warning(f"Error in run_monitor for chat {chat_id}: {e}")
+                logger.warning(f"Polling exception in run_monitor for chat {chat_id}: {e}. Retrying in 3s...")
+                await asyncio.sleep(3.0)
+                continue
 
             await asyncio.sleep(2.5)
 
