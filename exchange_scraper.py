@@ -341,16 +341,26 @@ class ExchangeScraperEngine:
             return override
 
         matches = await self.fetch_live_matches_async()
+        target_clean = self._clean_team_name(team_name).upper()
         for m in matches:
             for outcome in m["odds"]:
                 name = outcome["name"]
                 if self._is_strict_team_match(team_name, name):
+                    matched_key = name.upper()
+                    # Cross-team leak prevention check
+                    if ("PAKISTAN" in matched_key and "ENGLAND" in target_clean) or \
+                       ("ENGLAND" in matched_key and "PAKISTAN" in target_clean) or \
+                       ("INDIA" in matched_key and "AUSTRALIA" in target_clean) or \
+                       ("AUSTRALIA" in matched_key and "INDIA" in target_clean):
+                        logger.warning(f"Cross-team leak prevented! Attempted to assign {matched_key} odds to target {target_clean}")
+                        return None
                     return outcome["back"]
 
         return None
 
     async def get_live_odds_data_for_team_async(self, team_name: str) -> Dict[str, Any]:
         override = self._get_override(team_name)
+        target_clean = self._clean_team_name(team_name).upper()
 
         matches = await self.fetch_live_matches_async()
         for m in matches:
@@ -358,8 +368,25 @@ class ExchangeScraperEngine:
             for idx, outcome in enumerate(odds):
                 name = outcome["name"]
                 if self._is_strict_team_match(team_name, name):
+                    matched_key = name.upper()
+                    # Cross-team leak prevention guard
+                    if ("PAKISTAN" in matched_key and "ENGLAND" in target_clean) or \
+                       ("ENGLAND" in matched_key and "PAKISTAN" in target_clean) or \
+                       ("INDIA" in matched_key and "AUSTRALIA" in target_clean) or \
+                       ("AUSTRALIA" in matched_key and "INDIA" in target_clean):
+                        logger.warning(f"Cross-team leak prevented! Attempted to assign {matched_key} odds to target {target_clean}")
+                        return {
+                            "target_team": target_clean,
+                            "target_odd": None,
+                            "target_lay": None,
+                            "opponent_team": None,
+                            "opponent_odd": None,
+                            "opponent_lay": None,
+                            "match_title": m.get("title")
+                        }
+
                     target_team = outcome["name"]
-                    target_odd = override if override else outcome["back"]
+                    target_odd = override if override else outcome.get("back")
                     target_lay = outcome.get("lay")
 
                     opponent_outcome = odds[1 - idx] if len(odds) > 1 else None

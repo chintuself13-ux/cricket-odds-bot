@@ -1015,6 +1015,7 @@ class TelegramOddsBot:
                         track["entry"] = latest_odd
                         track["entry_odd"] = latest_odd
                 else:
+                    track["current_odd"] = None
                     logger.info(f"Waiting for valid live odds for chat {chat_id} ({team_name}). Maintaining active tracking state.")
 
                 # 2. Check threshold trigger ONLY if real valid numeric odd (> 1.01) is scraped
