@@ -1001,6 +1001,33 @@ class TelegramOddsBot:
 
                 # 1. Fetch live odds
                 odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
+                
+                # Check for match conclusion
+                is_finished = odds_data.get("is_finished") if odds_data else False
+                status_str = (odds_data.get("status") or "").lower() if odds_data else ""
+                if not is_finished and any(kw in status_str for kw in ["won by", "ended", "result", "tied", "no result", "abandoned", "completed", "settled"]):
+                    is_finished = True
+
+                if is_finished:
+                    logger.info(f"Match ended for chat {chat_id} ({team_name}). Cleaning up tracking task automatically.")
+                    target_display = (track.get("target_team_clean") or team_name).upper()
+                    target_val = track.get("target", track.get("target_odd", 0.0))
+                    match_summary = odds_data.get("status") if odds_data and odds_data.get("status") not in ["In-Play", "Finished"] else "Match Concluded"
+
+                    # Remove job from memory and save state file
+                    if key in ACTIVE_TRACKS:
+                        del ACTIVE_TRACKS[key]
+                    save_active_jobs(ACTIVE_TRACKS)
+
+                    # Send final wrap-up notification to user (no siren or target alert)
+                    end_msg = (
+                        f"🏁 <b>MATCH ENDED!</b>\n\n"
+                        f"The tracked match for <b>{html.escape(target_display)}</b> has concluded (<i>{html.escape(str(match_summary))}</i>) without hitting your target odd ({target_val:.2f}).\n\n"
+                        f"Tracking session closed automatically."
+                    )
+                    await asyncio.to_thread(self.client.send_message, chat_id, end_msg, "HTML", False)
+                    break
+
                 latest_odd = odds_data.get("target_odd") if odds_data else None
 
                 if latest_odd is not None and isinstance(latest_odd, (int, float)) and latest_odd > 1.01:

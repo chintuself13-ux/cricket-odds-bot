@@ -237,7 +237,21 @@ class ExchangeScraperEngine:
             t1_override = self._get_override(team1)
             t2_override = self._get_override(team2)
 
-            # 1. Parse live R field (Paresh rate) and favorite team indicator from Crex live JSON state
+            # 1. Match status & completion detection
+            is_finished = False
+            status_text = "In-Play"
+
+            # Check for finished / ended match strings in HTML page or title
+            finished_patterns = r'\b(won by|match ended|result|tied|no result|abandoned|completed|settled|closed|match finished)\b'
+            if re.search(finished_patterns, clean_html, re.IGNORECASE):
+                is_finished = True
+                result_match = re.search(r'\b([A-Za-z0-9\s\-]+?\s+(?:won by|won|lost by|tied|abandoned)[^<"\n]*)\b', clean_html, re.IGNORECASE)
+                if result_match:
+                    status_text = result_match.group(1).strip()
+                else:
+                    status_text = "Finished"
+
+            # 2. Parse live R field (Paresh rate) and favorite team indicator from Crex live JSON state
             r_match = re.search(r'"R"\s*:\s*"(\d+)\+(\d+)"', clean_html)
             
             # Detect favorite team from Crex JSON state
@@ -261,6 +275,21 @@ class ExchangeScraperEngine:
 
             if fav_back is None:
                 if not t1_override and not t2_override:
+                    if is_finished:
+                        return {
+                            "id": slug,
+                            "title": f"{team1} vs {team2}",
+                            "sport": "Crex Live Score",
+                            "status": status_text,
+                            "is_finished": True,
+                            "crex_url": full_url,
+                            "home_team": team1,
+                            "away_team": team2,
+                            "odds": [],
+                            "favorite": None,
+                            "underdog": None,
+                            "recommendations": {}
+                        }
                     return None
                 fav_back = t1_override or t2_override or 1.12
                 fav_lay = round(fav_back + 0.01, 2)
@@ -317,7 +346,8 @@ class ExchangeScraperEngine:
                 "id": slug,
                 "title": f"{team1} vs {team2}",
                 "sport": "Crex Live Score",
-                "status": "In-Play",
+                "status": status_text,
+                "is_finished": is_finished,
                 "crex_url": full_url,
                 "home_team": team1,
                 "away_team": team2,
@@ -365,6 +395,9 @@ class ExchangeScraperEngine:
         matches = await self.fetch_live_matches_async()
         for m in matches:
             odds = m.get("odds", [])
+            is_finished = m.get("is_finished", False)
+            match_status = m.get("status", "In-Play")
+
             for idx, outcome in enumerate(odds):
                 name = outcome["name"]
                 if self._is_strict_team_match(team_name, name):
@@ -382,7 +415,9 @@ class ExchangeScraperEngine:
                             "opponent_team": None,
                             "opponent_odd": None,
                             "opponent_lay": None,
-                            "match_title": m.get("title")
+                            "match_title": m.get("title"),
+                            "is_finished": is_finished,
+                            "status": match_status
                         }
 
                     target_team = outcome["name"]
@@ -401,7 +436,26 @@ class ExchangeScraperEngine:
                         "opponent_team": opponent_team,
                         "opponent_odd": opponent_odd,
                         "opponent_lay": opponent_lay,
-                        "match_title": m.get("title")
+                        "match_title": m.get("title"),
+                        "is_finished": is_finished,
+                        "status": match_status
+                    }
+
+            # Check if match is finished even if odds array is empty
+            home_t = m.get("home_team", "")
+            away_t = m.get("away_team", "")
+            if self._is_strict_team_match(team_name, home_t) or self._is_strict_team_match(team_name, away_t):
+                if is_finished:
+                    return {
+                        "target_team": target_clean,
+                        "target_odd": None,
+                        "target_lay": None,
+                        "opponent_team": None,
+                        "opponent_odd": None,
+                        "opponent_lay": None,
+                        "match_title": m.get("title"),
+                        "is_finished": True,
+                        "status": match_status
                     }
 
         if override:
