@@ -6,8 +6,10 @@ import threading
 import logging
 import html
 import json
+import re
 import urllib.request
 import urllib.parse
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -45,7 +47,7 @@ def start_health_server(port: int):
 class TelegramBotClient:
     """
     Lightweight Telegram Bot API client using urllib.
-    Supports Long Polling (getUpdates) and message dispatching.
+    Supports Long Polling (getUpdates), sendMessage, and sendPhoto.
     """
     def __init__(self, token: str):
         self.token = token.strip()
@@ -73,7 +75,7 @@ class TelegramBotClient:
         disable_notification: bool = False,
         reply_markup: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, Dict[str, Any]]:
-        """Send message to a Telegram chat."""
+        """Send text message to a Telegram chat."""
         payload = {
             "chat_id": chat_id,
             "text": text,
@@ -85,6 +87,22 @@ class TelegramBotClient:
             payload["reply_markup"] = reply_markup
 
         return self._make_request("sendMessage", json_payload=payload)
+
+    def send_photo(
+        self,
+        chat_id: str | int,
+        photo: str,
+        caption: str = "",
+        parse_mode: str = "HTML"
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Send photo (via URL or file_id) to a Telegram chat."""
+        payload = {
+            "chat_id": chat_id,
+            "photo": photo,
+            "caption": caption,
+            "parse_mode": parse_mode
+        }
+        return self._make_request("sendPhoto", json_payload=payload)
 
     def _make_request(
         self,
@@ -118,6 +136,7 @@ class TelegramBotClient:
         except Exception as e:
             return False, str(e)
 
+
 # Global dictionary for instant 0ms /status response: ACTIVE_TRACKS[chat_id]
 ACTIVE_TRACKS: Dict[Any, Dict[str, Dict[str, Any]]] = {}
 
@@ -145,35 +164,72 @@ DEFAULT_ADMIN_ID = 7592394328
 ALLOWED_USERS_FILE = "allowed_users.json"
 
 
-def load_allowed_users() -> set[int]:
-    allowed = {DEFAULT_ADMIN_ID}
+def load_allowed_users() -> Dict[int, Optional[datetime]]:
+    allowed: Dict[int, Optional[datetime]] = {DEFAULT_ADMIN_ID: None}
     env_admin = os.environ.get("ADMIN_ID")
     if env_admin:
         try:
-            allowed.add(int(env_admin))
+            allowed[int(env_admin)] = None
         except ValueError:
             pass
+
     if os.path.exists(ALLOWED_USERS_FILE):
         try:
             with open(ALLOWED_USERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, list):
+                if isinstance(data, dict):
+                    for uid_str, exp_str in data.items():
+                        try:
+                            uid = int(uid_str)
+                            if exp_str is None:
+                                allowed[uid] = None
+                            else:
+                                dt = datetime.fromisoformat(exp_str)
+                                if dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                allowed[uid] = dt
+                        except Exception:
+                            pass
+                elif isinstance(data, list):
                     for u in data:
-                        allowed.add(int(u))
+                        allowed[int(u)] = None
         except Exception as e:
             logger.warning(f"Could not load allowed_users.json: {e}")
+
+    # Primary Admin is always permanent
+    allowed[DEFAULT_ADMIN_ID] = None
     return allowed
 
 
-def save_allowed_users(allowed: set[int]):
+def save_allowed_users(allowed: Dict[int, Optional[datetime]]):
     try:
+        data = {}
+        for uid, exp in allowed.items():
+            data[str(uid)] = exp.isoformat() if exp else None
         with open(ALLOWED_USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(allowed), f)
+            json.dump(data, f, indent=2)
     except Exception as e:
         logger.warning(f"Could not save allowed_users.json: {e}")
 
 
-ALLOWED_USERS = load_allowed_users()
+ALLOWED_USERS: Dict[int, Optional[datetime]] = load_allowed_users()
+
+
+def parse_duration(duration_str: str) -> Optional[timedelta]:
+    s = duration_str.strip().lower()
+    if not s:
+        return None
+    m = re.match(r"^(\d+)([dhm]?)$", s)
+    if not m:
+        return None
+    val = int(m.group(1))
+    unit = m.group(2)
+    if unit == "h":
+        return timedelta(hours=val)
+    elif unit == "m":
+        return timedelta(minutes=val)
+    else:  # 'd' or empty default to days
+        return timedelta(days=val)
 
 
 class TelegramOddsBot:
@@ -195,6 +251,27 @@ class TelegramOddsBot:
         # Shared active tracking state dictionary for instant 0ms /status response
         self.active_tracks: Dict[str, Dict[str, Any]] = {}
         self.tracking_tasks: Dict[str, asyncio.Task] = {}
+
+    def verify_access(self, user_id: int) -> Tuple[bool, bool]:
+        """
+        Returns (is_allowed, is_expired).
+        If access is expired, automatically blocks user and saves allowed_users.json.
+        """
+        if user_id not in ALLOWED_USERS:
+            return False, False
+
+        expiry = ALLOWED_USERS[user_id]
+        if expiry is None:
+            return True, False  # Permanent access (Admin)
+
+        now = datetime.now(timezone.utc)
+        if now > expiry:
+            del ALLOWED_USERS[user_id]
+            save_allowed_users(ALLOWED_USERS)
+            logger.info(f"User {user_id} access expired and blocked.")
+            return False, True
+
+        return True, False
 
     async def start_async(self):
         # 1. Start background HTTP server for Render Web Service Port Scan & Health Checks
@@ -253,7 +330,7 @@ class TelegramOddsBot:
 
     def _handle_update(self, update: Dict[str, Any]):
         message = update.get("message")
-        if not message or "text" not in message:
+        if not message:
             return
 
         chat_id = message["chat"]["id"]
@@ -264,137 +341,222 @@ class TelegramOddsBot:
         except (ValueError, TypeError):
             user_id = raw_user_id
 
-        text = message["text"].strip()
-        parts = text.split()
-        cmd = parts[0].lower() if parts else ""
+        is_admin = (user_id == DEFAULT_ADMIN_ID or chat_id == DEFAULT_ADMIN_ID)
 
-        logger.info(f"Received from chat {chat_id} (user {user_id}): {text}")
+        text = message.get("text", "").strip() if "text" in message else ""
+        caption = message.get("caption", "").strip() if "caption" in message else ""
+        photo = message.get("photo")
 
-        # Admin Commands
-        if cmd == "/allow":
-            asyncio.create_task(self._cmd_allow_async(chat_id, user_id, parts[1:]))
-            return
-        elif cmd == "/revoke":
-            asyncio.create_task(self._cmd_revoke_async(chat_id, user_id, parts[1:]))
-            return
-        elif cmd == "/users":
-            asyncio.create_task(self._cmd_users_async(chat_id, user_id))
-            return
+        is_cmd = text.startswith("/")
 
-        # Authorization check
-        is_authorized = False
-        try:
-            if int(user_id) in ALLOWED_USERS or int(chat_id) in ALLOWED_USERS:
-                is_authorized = True
-        except (ValueError, TypeError):
-            if user_id in ALLOWED_USERS or chat_id in ALLOWED_USERS:
-                is_authorized = True
+        if is_cmd:
+            parts = text.split()
+            cmd = parts[0].lower()
 
-        if not is_authorized:
-            first_name = html.escape(str(from_user.get("first_name", "")))
-            last_name = html.escape(str(from_user.get("last_name", "")))
-            full_name = f"{first_name} {last_name}".strip() or "User"
-            uname = from_user.get("username")
-            username = f"@{html.escape(str(uname))}" if uname else "No username"
+            logger.info(f"Command from chat {chat_id} (user {user_id}): {text}")
 
-            # 1. Show unauthorized message to user with their ID
-            user_msg = (
-                f"🔒 <b>ACCESS REQUIRED</b>\n\n"
-                f"Welcome, <b>{full_name}</b>!\n"
-                f"Your Telegram ID: <code>{user_id}</code>\n\n"
-                f"⚠️ Access to this Live Cricket Odds Bot requires Admin authorization.\n"
-                f"An approval request has been sent to the Admin. Please wait for approval."
-            )
-            asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, user_msg, "HTML", False))
+            # 1. Admin Commands
+            if cmd in ["/allow", "/revoke", "/users"]:
+                if not is_admin:
+                    asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can use this command.", "HTML", False))
+                    return
+                if cmd == "/allow":
+                    asyncio.create_task(self._cmd_allow_async(chat_id, parts[1:]))
+                elif cmd == "/revoke":
+                    asyncio.create_task(self._cmd_revoke_async(chat_id, parts[1:]))
+                elif cmd == "/users":
+                    asyncio.create_task(self._cmd_users_async(chat_id))
+                return
 
-            # 2. Alert Admin (7592394328) with user info & ready-to-use /allow command
-            admin_alert = (
-                f"🔔 <b>NEW ACCESS REQUEST RECEIVED!</b>\n\n"
+            # 2. Public /buy command
+            if cmd == "/buy":
+                asyncio.create_task(self._cmd_buy_async(chat_id))
+                return
+
+            # 3. Access & Timed Expiry Verification for all feature commands
+            is_allowed, is_expired = self.verify_access(user_id)
+
+            if is_expired:
+                asyncio.create_task(asyncio.to_thread(
+                    self.client.send_message,
+                    chat_id,
+                    "⚠️ Your access has expired. Please renew for ₹50/month via /buy.",
+                    "HTML", False
+                ))
+                return
+
+            if not is_allowed:
+                if cmd in ["/start", "/help"]:
+                    self._handle_unauthorized_start(chat_id, user_id, from_user)
+                else:
+                    asyncio.create_task(asyncio.to_thread(
+                        self.client.send_message,
+                        chat_id,
+                        "🔒 <b>ACCESS REQUIRED</b>\n\n"
+                        "You do not have active authorization.\n"
+                        "Send <code>/start</code> to request a 3-day free trial or <code>/buy</code> for subscription details.",
+                        "HTML", False
+                    ))
+                return
+
+            # 4. Dispatch feature commands for authorized users
+            if cmd in ["/start", "/help"]:
+                self._cmd_start(chat_id, user_id)
+            elif cmd == "/matches":
+                asyncio.create_task(self._cmd_matches_async(chat_id))
+            elif cmd == "/track":
+                asyncio.create_task(self._cmd_track_async(chat_id, parts[1:]))
+            elif cmd == "/status":
+                asyncio.create_task(self._cmd_status_async(chat_id))
+            elif cmd == "/stop":
+                asyncio.create_task(self._cmd_stop_async(chat_id, parts[1:]))
+            elif cmd == "/mute":
+                asyncio.create_task(self._cmd_mute_async(chat_id, parts[1:], muted=True))
+            elif cmd == "/unmute":
+                asyncio.create_task(self._cmd_mute_async(chat_id, parts[1:], muted=False))
+            elif cmd == "/setodd":
+                asyncio.create_task(self._cmd_setodd_async(chat_id, parts[1:]))
+            else:
+                asyncio.create_task(asyncio.to_thread(
+                    self.client.send_message,
+                    chat_id,
+                    "❓ Unknown command. Send <code>/help</code> or <code>/matches</code> to get started.",
+                    "HTML", False
+                ))
+        else:
+            # Handle non-command messages (Text or Screenshot/Photo proof submissions)
+            if not is_admin:
+                asyncio.create_task(self._handle_user_proof_submission(chat_id, user_id, from_user, text, photo, caption))
+
+    def _handle_unauthorized_start(self, chat_id: str | int, user_id: int, from_user: Dict[str, Any]):
+        first_name = html.escape(str(from_user.get("first_name", "")))
+        last_name = html.escape(str(from_user.get("last_name", "")))
+        full_name = f"{first_name} {last_name}".strip() or "User"
+        uname = from_user.get("username")
+        username = f"@{html.escape(str(uname))}" if uname else "No username"
+
+        # 1. Send welcome & free trial info to user
+        user_msg = (
+            f"👋 <b>Welcome to Live Cricket Odds & Alert Bot!</b>\n\n"
+            f"🎁 Get a <b>3-Day Free Trial</b> to track live cricket exchange odds, "
+            f"automated cashout calculations, and high priority alerts!\n\n"
+            f"📩 Admin has been notified to activate your 3-day trial.\n"
+            f"💳 Or send <code>/buy</code> to purchase a 30-day subscription for ₹50."
+        )
+        asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, user_msg, "HTML", False))
+
+        # 2. Notify Admin with 1-tap /allow <user_id> 3d command
+        admin_alert = (
+            f"🔔 <b>NEW USER TRIAL REQUEST!</b>\n\n"
+            f"👤 <b>Name:</b> {full_name}\n"
+            f"🏷️ <b>Username:</b> {username}\n"
+            f"🆔 <b>User ID:</b> <code>{user_id}</code>\n\n"
+            f"👉 Tap to activate 3-Day Trial:\n"
+            f"<code>/allow {user_id} 3d</code>"
+        )
+        asyncio.create_task(asyncio.to_thread(self.client.send_message, DEFAULT_ADMIN_ID, admin_alert, "HTML", False))
+
+    async def _cmd_buy_async(self, chat_id: str | int):
+        qr_url = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa=rajdiljeet@fam%26pn=OddsTracker%26am=50%26cu=INR"
+        caption = (
+            "💳 Subscription Plan: ₹50 / 30 Days\n"
+            "UPI ID: <code>rajdiljeet@fam</code> (tap to copy)\n\n"
+            "Scan the QR or copy the UPI ID to pay ₹50.\n"
+            "After payment, send the screenshot or 12-digit UTR number right here in this chat."
+        )
+
+        ok, _ = await asyncio.to_thread(self.client.send_photo, chat_id, qr_url, caption, "HTML")
+        if not ok:
+            fallback_msg = f"💳 <b>BUY SUBSCRIPTION</b>\n\n{caption}"
+            await asyncio.to_thread(self.client.send_message, chat_id, fallback_msg, "HTML", False)
+
+    async def _handle_user_proof_submission(
+        self,
+        chat_id: str | int,
+        user_id: int,
+        from_user: Dict[str, Any],
+        text: str,
+        photo: Optional[List[Dict[str, Any]]],
+        caption: str
+    ):
+        first_name = html.escape(str(from_user.get("first_name", "")))
+        last_name = html.escape(str(from_user.get("last_name", "")))
+        full_name = f"{first_name} {last_name}".strip() or "User"
+        uname = from_user.get("username")
+        username = f"@{html.escape(str(uname))}" if uname else "No username"
+
+        if photo:
+            photo_file_id = photo[-1].get("file_id")
+            admin_caption = (
+                f"💳 <b>PAYMENT PROOF SUBMITTED (SCREENSHOT)!</b>\n\n"
                 f"👤 <b>Name:</b> {full_name}\n"
                 f"🏷️ <b>Username:</b> {username}\n"
-                f"🆔 <b>User ID:</b> <code>{user_id}</code>\n\n"
-                f"👉 Approve user instantly:\n"
-                f"<code>/allow {user_id}</code>"
+                f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
+                f"💬 <b>Caption:</b> {html.escape(caption) if caption else 'None'}\n\n"
+                f"👉 Activate 30-Day Subscription:\n"
+                f"<code>/allow {user_id} 30d</code>"
             )
-            asyncio.create_task(asyncio.to_thread(self.client.send_message, DEFAULT_ADMIN_ID, admin_alert, "HTML", False))
-            return
-
-        # Dispatch commands for authorized users
-        if cmd in ["/start", "/help"]:
-            self._cmd_start(chat_id, user_id)
-        elif cmd == "/matches":
-            asyncio.create_task(self._cmd_matches_async(chat_id))
-        elif cmd == "/track":
-            asyncio.create_task(self._cmd_track_async(chat_id, parts[1:]))
-        elif cmd == "/status":
-            asyncio.create_task(self._cmd_status_async(chat_id))
-        elif cmd == "/stop":
-            asyncio.create_task(self._cmd_stop_async(chat_id, parts[1:]))
-        elif cmd == "/mute":
-            asyncio.create_task(self._cmd_mute_async(chat_id, parts[1:], muted=True))
-        elif cmd == "/unmute":
-            asyncio.create_task(self._cmd_mute_async(chat_id, parts[1:], muted=False))
-        elif cmd == "/setodd":
-            asyncio.create_task(self._cmd_setodd_async(chat_id, parts[1:]))
+            await asyncio.to_thread(self.client.send_photo, DEFAULT_ADMIN_ID, photo_file_id, admin_caption, "HTML")
         else:
-            self.client.send_message(
-                chat_id,
-                "❓ Unknown command. Send <code>/help</code> or <code>/matches</code> to get started."
+            admin_msg = (
+                f"💳 <b>PAYMENT PROOF / MESSAGE SUBMITTED!</b>\n\n"
+                f"👤 <b>Name:</b> {full_name}\n"
+                f"🏷️ <b>Username:</b> {username}\n"
+                f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
+                f"💬 <b>Message:</b> {html.escape(text)}\n\n"
+                f"👉 Activate 30-Day Subscription:\n"
+                f"<code>/allow {user_id} 30d</code>"
             )
+            await asyncio.to_thread(self.client.send_message, DEFAULT_ADMIN_ID, admin_msg, "HTML", False)
 
-    async def _cmd_allow_async(self, chat_id: str | int, sender_id: str | int, args: list):
-        try:
-            is_admin = (int(sender_id) == DEFAULT_ADMIN_ID or int(chat_id) == DEFAULT_ADMIN_ID)
-        except (ValueError, TypeError):
-            is_admin = (sender_id == DEFAULT_ADMIN_ID or chat_id == DEFAULT_ADMIN_ID)
+        reply_msg = "✅ Received! Admin will verify and activate your access shortly."
+        await asyncio.to_thread(self.client.send_message, chat_id, reply_msg, "HTML", False)
 
-        if not is_admin:
-            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can authorize users.", "HTML", False)
-            return
-
+    async def _cmd_allow_async(self, chat_id: str | int, args: list):
         if not args:
             await asyncio.to_thread(
                 self.client.send_message,
                 chat_id,
-                "⚠️ <b>Usage Syntax:</b> <code>/allow &lt;user_id&gt;</code>\n"
-                "<i>Example:</i> <code>/allow 123456789</code>",
+                "⚠️ <b>Usage Syntax:</b> <code>/allow &lt;user_id&gt; &lt;duration&gt;</code>\n"
+                "<i>Example:</i> <code>/allow 12345678 3d</code> (3-day trial)\n"
+                "<i>Example:</i> <code>/allow 12345678 30d</code> (30-day paid)",
                 "HTML", False
             )
             return
 
         try:
             target_user_id = int(args[0].strip())
-            ALLOWED_USERS.add(target_user_id)
+            duration_str = args[1].strip() if len(args) > 1 else "30d"
+            delta = parse_duration(duration_str)
+
+            if not delta:
+                await asyncio.to_thread(
+                    self.client.send_message,
+                    chat_id,
+                    "❌ Invalid duration format. Use e.g. <code>3d</code>, <code>30d</code>, <code>12h</code>.",
+                    "HTML", False
+                )
+                return
+
+            expiry_dt = datetime.now(timezone.utc) + delta
+            ALLOWED_USERS[target_user_id] = expiry_dt
             save_allowed_users(ALLOWED_USERS)
 
-            admin_msg = f"✅ User <code>{target_user_id}</code> has been authorized successfully!"
+            expiry_str = expiry_dt.strftime("%Y-%m-%d %H:%M UTC")
+            admin_msg = f"✅ User <code>{target_user_id}</code> granted access for <b>{duration_str}</b>!\n📅 Expiry: <code>{expiry_str}</code>"
             await asyncio.to_thread(self.client.send_message, chat_id, admin_msg, "HTML", False)
 
-            user_msg = (
-                f"🎉 <b>ACCESS GRANTED!</b>\n\n"
-                f"You have been authorized by the Admin.\n"
-                f"Send <code>/matches</code> to view live matches and odds!"
-            )
+            user_msg = f"🎉 Your access has been activated for {duration_str}!"
             asyncio.create_task(asyncio.to_thread(self.client.send_message, target_user_id, user_msg, "HTML", False))
         except ValueError:
             await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid User ID. Must be a numeric Telegram ID.", "HTML", False)
 
-    async def _cmd_revoke_async(self, chat_id: str | int, sender_id: str | int, args: list):
-        try:
-            is_admin = (int(sender_id) == DEFAULT_ADMIN_ID or int(chat_id) == DEFAULT_ADMIN_ID)
-        except (ValueError, TypeError):
-            is_admin = (sender_id == DEFAULT_ADMIN_ID or chat_id == DEFAULT_ADMIN_ID)
-
-        if not is_admin:
-            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can revoke users.", "HTML", False)
-            return
-
+    async def _cmd_revoke_async(self, chat_id: str | int, args: list):
         if not args:
             await asyncio.to_thread(
                 self.client.send_message,
                 chat_id,
-                "⚠️ <b>Usage Syntax:</b> <code>/revoke &lt;user_id&gt;</code>\n"
-                "<i>Example:</i> <code>/revoke 123456789</code>",
+                "⚠️ <b>Usage Syntax:</b> <code>/revoke &lt;user_id&gt;</code>",
                 "HTML", False
             )
             return
@@ -406,44 +568,48 @@ class TelegramOddsBot:
                 return
 
             if target_user_id in ALLOWED_USERS:
-                ALLOWED_USERS.remove(target_user_id)
+                del ALLOWED_USERS[target_user_id]
                 save_allowed_users(ALLOWED_USERS)
+                admin_msg = f"✅ Access for user <code>{target_user_id}</code> has been revoked."
+            else:
+                admin_msg = f"ℹ️ User <code>{target_user_id}</code> was not in allowed list."
 
-            admin_msg = f"User {target_user_id} has been removed from allowed list."
             await asyncio.to_thread(self.client.send_message, chat_id, admin_msg, "HTML", False)
-
         except ValueError:
-            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid User ID. Must be a numeric Telegram ID.", "HTML", False)
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid User ID.", "HTML", False)
 
-    async def _cmd_users_async(self, chat_id: str | int, sender_id: str | int):
-        try:
-            is_admin = (int(sender_id) == DEFAULT_ADMIN_ID or int(chat_id) == DEFAULT_ADMIN_ID)
-        except (ValueError, TypeError):
-            is_admin = (sender_id == DEFAULT_ADMIN_ID or chat_id == DEFAULT_ADMIN_ID)
-
-        if not is_admin:
-            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can view user list.", "HTML", False)
-            return
-
+    async def _cmd_users_async(self, chat_id: str | int):
         user_lines = []
-        for uid in sorted(ALLOWED_USERS):
-            admin_tag = " (Admin)" if uid == DEFAULT_ADMIN_ID else ""
-            user_lines.append(f"• <code>{uid}</code>{admin_tag}")
+        now = datetime.now(timezone.utc)
+        for uid, expiry in sorted(ALLOWED_USERS.items(), key=lambda x: str(x[0])):
+            if uid == DEFAULT_ADMIN_ID or expiry is None:
+                user_lines.append(f"• <code>{uid}</code> — 👑 Admin (Permanent)")
+            else:
+                if now > expiry:
+                    status_str = "Expired"
+                else:
+                    rem = expiry - now
+                    days = rem.days
+                    hrs = rem.seconds // 3600
+                    status_str = f"{days}d {hrs}h remaining (Expires: {expiry.strftime('%Y-%m-%d %H:%M UTC')})"
+                user_lines.append(f"• <code>{uid}</code> — {status_str}")
 
         msg = (
             f"👥 <b>AUTHORIZED USERS LIST</b>\n\n"
             f"👑 <b>Admin ID:</b> <code>{DEFAULT_ADMIN_ID}</code>\n"
-            f"📊 <b>Total Authorized Users:</b> {len(ALLOWED_USERS)}\n\n"
+            f"📊 <b>Total Users:</b> {len(ALLOWED_USERS)}\n\n"
             + "\n".join(user_lines)
         )
         await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
 
     def _cmd_start(self, chat_id: str | int, user_id: Optional[str | int] = None):
+        is_admin = (user_id and (user_id == DEFAULT_ADMIN_ID or str(user_id) == str(DEFAULT_ADMIN_ID)))
         admin_extra = (
-            "• <code>/allow &lt;user_id&gt;</code> — (Admin Only) Authorize a user for bot access\n"
-            "• <code>/revoke &lt;user_id&gt;</code> — (Admin Only) Revoke user authorization\n"
-            "• <code>/users</code> — (Admin Only) Display Admin ID and authorized users\n"
-        ) if (user_id and (user_id == DEFAULT_ADMIN_ID or str(user_id) == str(DEFAULT_ADMIN_ID))) else ""
+            "• <code>/allow &lt;user_id&gt; &lt;duration&gt;</code> — Grant access (e.g. <code>/allow 12345678 30d</code>)\n"
+            "• <code>/revoke &lt;user_id&gt;</code> — Revoke user authorization\n"
+            "• <code>/users</code> — View all active users & remaining days\n"
+        ) if is_admin else ""
+
         help_text = (
             "💰 <b>LIVE CRICKET ODDS ALERT & CASHOUT CALCULATOR BOT</b> ⚡\n\n"
             "Monitor live cricket exchange rates with an <b>automated Green Book Cashout Calculator</b>! "
@@ -454,6 +620,7 @@ class TelegramOddsBot:
             "  <i>Quick Track:</i> <code>/track Australia 1.06 1000</code>\n\n"
             "• <code>/matches</code> — View live matches with Win Chance %, Decimal & Indian (Paresh/Lagan) Odds\n"
             "• <code>/status</code> — View active tracked matches, live odds, elapsed time & instant cashout\n"
+            "• <code>/buy</code> — View ₹50 subscription plan & payment QR\n"
             "• <code>/mute</code> — Silence repeating alert notifications without ending tracking\n"
             "• <code>/unmute</code> — Resume alert notifications\n"
             "• <code>/stop [team]</code> — Stop tracking a match and clear background task\n"
@@ -463,13 +630,20 @@ class TelegramOddsBot:
         self.client.send_message(chat_id, help_text)
 
     async def _cmd_matches_async(self, chat_id: str | int):
-        matches = await global_exchange_scraper.fetch_live_matches_async()
+        raw_matches = await global_exchange_scraper.fetch_live_matches_async()
+
+        matches = []
+        for m in raw_matches:
+            home = m.get("home_team", "").strip()
+            away = m.get("away_team", "").strip()
+            if not home or not away or home.lower() == away.lower():
+                continue
+            fav = m.get("favorite")
+            if fav and fav.get("back", 0) > 1.0:
+                matches.append(m)
 
         if not matches:
-            msg = (
-                "ℹ️ <b>No Live Matches Found in Feed</b>\n"
-                "Try sending <code>/track Australia 1.05 1000</code> to track directly."
-            )
+            msg = "🏏 Currently no live matches are in-play. Please check back when a live game starts."
             await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
             return
 
@@ -482,8 +656,11 @@ class TelegramOddsBot:
             fav_ind = format_indian_odds(fav['back'], fav['lay']) if fav else ""
             dog_ind = format_indian_odds(underdog['back'], underdog['lay']) if underdog else ""
 
-            fav_line = f"• {fav['name']} (Fav): {fav_ind} ({fav['back']:.2f} / {fav['lay']:.2f})" if fav else ""
-            dog_line = f"• {underdog['name']}: {dog_ind} ({underdog['back']:.2f} / {underdog['lay']:.2f})" if underdog else ""
+            fav_win = int(round((1.0 / max(1.01, fav['back'])) * 100)) if fav else 0
+            dog_win = int(round((1.0 / max(1.01, underdog['back'])) * 100)) if underdog else 0
+
+            fav_line = f"• {fav['name']} (Fav): {fav_ind} ({fav['back']:.2f} / {fav['lay']:.2f}) | {fav_win}% Win" if fav else ""
+            dog_line = f"• {underdog['name']}: {dog_ind} ({underdog['back']:.2f} / {underdog['lay']:.2f}) | {dog_win}% Win" if underdog else ""
 
             fav_cmd = recs.get('fav_track_cmd', f"/track {fav['name']} 1.05 1000")
             dog_cmd = recs.get('underdog_track_cmd', f"/track {underdog['name']} 4.50 1000")
@@ -545,7 +722,6 @@ class TelegramOddsBot:
             except ValueError:
                 pass
 
-        # 1. Explicitly fetch entry_odd from live rate of chosen team at moment command is run
         live_odd = await global_exchange_scraper.get_live_odd_for_team_async(clean_team)
         if live_odd is not None and isinstance(live_odd, (int, float)) and live_odd > 1.0:
             entry_odd = live_odd
@@ -554,9 +730,6 @@ class TelegramOddsBot:
         else:
             entry_odd = 1.12
 
-        # Green Book Hedging Calculation:
-        # lay_stake = (entry_odd * stake) / target_odd
-        # green_book_profit = lay_stake - stake
         lay_stake_proj = round((entry_odd * stake_val) / max(0.01, threshold), 2)
         profit_proj = round(lay_stake_proj - stake_val, 2)
 
@@ -580,7 +753,6 @@ class TelegramOddsBot:
         }
         ACTIVE_TRACKS[chat_id] = track_entry
 
-        # Add to engine for compatibility
         self.engine.add_track(
             chat_id=chat_id,
             match_url=raw_source,
@@ -592,7 +764,6 @@ class TelegramOddsBot:
             entry_odd=entry_odd
         )
 
-        # 2. Send instant confirmation card with explicit Entry Odd (Auto)
         ind_target = format_indian_odds(threshold)
         ind_entry = format_indian_odds(entry_odd)
 
@@ -609,7 +780,6 @@ class TelegramOddsBot:
         )
         await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
 
-        # 3. Spawn detached async background monitor task and exit /track function immediately!
         task_key = str(chat_id)
         if task_key in self.tracking_tasks:
             self.tracking_tasks[task_key].cancel()
@@ -626,11 +796,9 @@ class TelegramOddsBot:
             team_name = track.get("team") or track.get("team_name")
 
             try:
-                # Fetch Crex feed asynchronously using httpx / async scraper
                 latest_odd = await global_exchange_scraper.get_live_odd_for_team_async(team_name)
 
                 if latest_odd is not None:
-                    # Update ACTIVE_TRACKS[chat_id]["current_odd"] = latest_odd on every tick
                     track["current_odd"] = latest_odd
                     track["last_seen_odd"] = latest_odd
                     if track.get("entry") is None or not isinstance(track.get("entry"), (int, float)):
@@ -640,7 +808,6 @@ class TelegramOddsBot:
                 curr = track.get("current_odd")
                 target_val = track.get("target", track.get("target_odd", 0.0))
 
-                # Check threshold trigger
                 if isinstance(curr, (int, float)) and curr <= target_val:
                     track["status"] = "TRIGGERED"
                     now = time.time()
@@ -675,11 +842,9 @@ class TelegramOddsBot:
             except Exception as e:
                 logger.warning(f"Error in run_monitor for chat {chat_id}: {e}")
 
-            # End every loop with await asyncio.sleep(2.5) (NEVER time.sleep)
             await asyncio.sleep(2.5)
 
     async def _cmd_status_async(self, chat_id: str | int):
-        # ZERO network calls! Instant reading from memory dictionary ACTIVE_TRACKS[chat_id]
         if chat_id not in ACTIVE_TRACKS and str(chat_id) not in ACTIVE_TRACKS:
             await asyncio.to_thread(
                 self.client.send_message,
@@ -811,6 +976,7 @@ class TelegramOddsBot:
 
     def _on_error(self, job: TrackJob, err_msg: str):
         pass
+
 
 if __name__ == "__main__":
     token = BOT_TOKEN
