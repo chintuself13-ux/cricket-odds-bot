@@ -288,7 +288,7 @@ class TelegramOddsBot:
             print(f"\n==================================================")
             print(f"🚀 Telegram Live Cricket Alert & Cashout Bot (@{bot_name})")
             print(f"Async Architecture: Detached Background Workers (0ms /status)")
-            print(f"Status: RUNNING 24/7 (Ball-by-ball Crex Odds)")
+            print(f"Status: RUNNING 24/7 (Ball-by-ball Live Exchange Odds)")
             print(f"Admin ID: {DEFAULT_ADMIN_ID} | Authorized Users: {len(ALLOWED_USERS)}")
             print(f"Health Check HTTP Server: 0.0.0.0:{self.port}")
             print(f"==================================================\n")
@@ -744,7 +744,7 @@ class TelegramOddsBot:
             "current_odd": entry_odd,
             "last_seen_odd": entry_odd,
             "stake": stake_val,
-            "data_source": "Crex Live Scraper",
+            "data_source": "⚡ Live Exchange Feed",
             "start_time": time.time(),
             "muted": False,
             "status": "ACTIVE",
@@ -773,10 +773,10 @@ class TelegramOddsBot:
             f"📊 <b>Entry Odd (Auto):</b> {entry_odd:.2f} (<code>{ind_entry}</code>)\n"
             f"🎯 <b>Target Odd:</b> {threshold:.2f} (<code>{ind_target}</code>)\n"
             f"💵 <b>Invested Stake:</b> ₹{stake_val:,.0f}\n"
-            f"📡 <b>Data Source:</b> Crex Live Scraper\n"
+            f"📡 <b>Data Source:</b> ⚡ Live Exchange Feed\n"
             f"💰 <b>Projected Green Book Profit:</b> +₹{profit_proj:,.2f} (Both sides equal profit 💚)\n"
             f"📈 <b>Required Lay Stake at Target:</b> ₹{lay_stake_proj:,.2f}\n\n"
-            f"⚡ <i>Monitoring Crex live feed in detached background task. Send <code>/status</code> anytime for instant updates!</i>"
+            f"⚡ <i>Live market odds monitored in real time. Send <code>/status</code> anytime for instant updates!</i>"
         )
         await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
 
@@ -825,7 +825,7 @@ class TelegramOddsBot:
                             f"🚨 <b>HIGH PRIORITY ODDS ALERT! TARGET HIT!</b> 🚨\n\n"
                             f"🎯 <b>Target Team:</b> {html.escape(str(team_name).upper())}\n"
                             f"📈 <b>Current Live Odd:</b> {curr:.2f} (<code>{ind_odd}</code>) [Target: &lt;= {target_val:.2f}]\n"
-                            f"📡 <b>Data Source:</b> Crex Live Scraper\n"
+                            f"📡 <b>Data Source:</b> ⚡ Live Exchange Feed\n"
                             f"📊 <b>Entry Odd (Auto Locked):</b> {entry_val:.2f}\n"
                             f"💵 <b>Invested Stake:</b> ₹{stake_val:,.0f}\n\n"
                             f"💰 <b>GREEN BOOK CASHOUT BREAKDOWN:</b>\n"
@@ -896,7 +896,7 @@ class TelegramOddsBot:
             f"🎯 <b>Target:</b> {str(team_name).upper()} &lt;= {target:.2f} (<code>{target_ind}</code>){mute_str}\n"
             f"⚡ <b>Current Live Odd:</b> {curr_str}\n"
             f"📊 <b>Entry Odd (Auto):</b> {entry_str} | <b>Stake:</b> ₹{stake:,.0f}\n"
-            f"📡 <b>Data Source:</b> Crex Live Scraper\n"
+            f"📡 <b>Data Source:</b> ⚡ Live Exchange Feed\n"
             f"⏱ <b>Elapsed Tracking Time:</b> {elapsed_str}\n\n"
             f"💰 <b>Live Cashout Calculation:</b>\n"
             f"👉 Lay <b>₹{lay_stake:,.2f}</b> @ {curr_val:.2f}\n"
