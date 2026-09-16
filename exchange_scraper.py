@@ -237,22 +237,42 @@ class ExchangeScraperEngine:
             t1_override = self._get_override(team1)
             t2_override = self._get_override(team2)
 
-            # 1. Match status & completion detection
+            # 1. Match status & completion detection (Scoped to header / scoreboard container & JSON state only)
             is_finished = False
             status_text = "In-Play"
 
-            # Check for finished / ended match strings in HTML page or title
-            finished_patterns = r'\b(won by|match ended|result|tied|no result|abandoned|completed|settled|closed|match finished)\b'
-            if re.search(finished_patterns, clean_html, re.IGNORECASE):
+            # Extract header status elements & JSON status string (do NOT search whole page text)
+            header_status_match = re.search(
+                r'class="[^"]*(?:match-status|live-status|status-text|header-status|result-text)[^"]*"[^>]*>\s*([^<]+?)\s*</',
+                clean_html,
+                re.IGNORECASE
+            )
+            json_status_match = re.search(
+                r'"(?:matchStatus|mStatus|statusStr|resultText|matchResult)"\s*:\s*"([^"]+)"',
+                clean_html,
+                re.IGNORECASE
+            )
+
+            header_str = ""
+            if header_status_match:
+                header_str += " " + header_status_match.group(1)
+            if json_status_match:
+                header_str += " " + json_status_match.group(1)
+            if title_m and ("won by" in title_m.group(1).lower() or "match ended" in title_m.group(1).lower()):
+                header_str += " " + title_m.group(1)
+
+            # Strict finished match completion patterns (no loose "result" or "closed" keywords)
+            strict_finished_pattern = r'\b(won by|match ended|match finished|match abandoned|no result|match tied)\b'
+            if re.search(strict_finished_pattern, header_str, re.IGNORECASE):
                 is_finished = True
-                result_match = re.search(r'\b([A-Za-z0-9\s\-]+?\s+(?:won by|won|lost by|tied|abandoned)[^<"\n]*)\b', clean_html, re.IGNORECASE)
-                if result_match:
-                    status_text = result_match.group(1).strip()
-                else:
-                    status_text = "Finished"
+                status_text = header_str.strip()
 
             # 2. Parse live R field (Paresh rate) and favorite team indicator from Crex live JSON state
             r_match = re.search(r'"R"\s*:\s*"(\d+)\+(\d+)"', clean_html)
+
+            # GUARD ACTIVE ODDS: If live R field or odds exist, match is definitely LIVE!
+            if r_match:
+                is_finished = False
             
             # Detect favorite team from Crex JSON state
             fav_team_num = 1
@@ -423,6 +443,11 @@ class ExchangeScraperEngine:
                     target_team = outcome["name"]
                     target_odd = override if override else outcome.get("back")
                     target_lay = outcome.get("lay")
+
+                    # GUARD ACTIVE ODDS: If valid numeric odds exist, match is definitely LIVE!
+                    if target_odd is not None and isinstance(target_odd, (int, float)) and target_odd > 1.01:
+                        is_finished = False
+                        match_status = "In-Play"
 
                     opponent_outcome = odds[1 - idx] if len(odds) > 1 else None
                     opponent_team = opponent_outcome["name"] if opponent_outcome else None

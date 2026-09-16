@@ -1001,34 +1001,47 @@ class TelegramOddsBot:
 
                 # 1. Fetch live odds
                 odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
-                
-                # Check for match conclusion
-                is_finished = odds_data.get("is_finished") if odds_data else False
-                status_str = (odds_data.get("status") or "").lower() if odds_data else ""
-                if not is_finished and any(kw in status_str for kw in ["won by", "ended", "result", "tied", "no result", "abandoned", "completed", "settled"]):
-                    is_finished = True
-
-                if is_finished:
-                    logger.info(f"Match ended for chat {chat_id} ({team_name}). Cleaning up tracking task automatically.")
-                    target_display = (track.get("target_team_clean") or team_name).upper()
-                    target_val = track.get("target", track.get("target_odd", 0.0))
-                    match_summary = odds_data.get("status") if odds_data and odds_data.get("status") not in ["In-Play", "Finished"] else "Match Concluded"
-
-                    # Remove job from memory and save state file
-                    if key in ACTIVE_TRACKS:
-                        del ACTIVE_TRACKS[key]
-                    save_active_jobs(ACTIVE_TRACKS)
-
-                    # Send final wrap-up notification to user (no siren or target alert)
-                    end_msg = (
-                        f"🏁 <b>MATCH ENDED!</b>\n\n"
-                        f"The tracked match for <b>{html.escape(target_display)}</b> has concluded (<i>{html.escape(str(match_summary))}</i>) without hitting your target odd ({target_val:.2f}).\n\n"
-                        f"Tracking session closed automatically."
-                    )
-                    await asyncio.to_thread(self.client.send_message, chat_id, end_msg, "HTML", False)
-                    break
-
                 latest_odd = odds_data.get("target_odd") if odds_data else None
+
+                # RULE 2: GUARD ACTIVE ODDS - If live numeric odds exist, NEVER trigger MATCH ENDED!
+                if latest_odd is not None and isinstance(latest_odd, (int, float)) and latest_odd > 1.01:
+                    is_finished = False
+                    track["consecutive_finished_checks"] = 0
+                else:
+                    is_finished = odds_data.get("is_finished") if odds_data else False
+                    status_str = (odds_data.get("status") or "").lower() if odds_data else ""
+                    strict_kw = ["won by", "match ended", "match finished", "match abandoned", "no result", "match tied"]
+                    if not is_finished and any(kw in status_str for kw in strict_kw):
+                        is_finished = True
+
+                # RULE 3: PREVENT INSTANT TRIGGER - Require at least 2 consecutive checks where odds are absent AND status is finished
+                if is_finished and (latest_odd is None or not isinstance(latest_odd, (int, float)) or latest_odd <= 1.01):
+                    consecutive = track.get("consecutive_finished_checks", 0) + 1
+                    track["consecutive_finished_checks"] = consecutive
+                    
+                    if consecutive >= 2:
+                        logger.info(f"Match ended confirmed (2 consecutive checks) for chat {chat_id} ({team_name}). Cleaning up tracking task automatically.")
+                        target_display = (track.get("target_team_clean") or team_name).upper()
+                        target_val = track.get("target", track.get("target_odd", 0.0))
+                        match_summary = odds_data.get("status") if odds_data and odds_data.get("status") not in ["In-Play", "Finished"] else "Match Concluded"
+
+                        # Remove job from memory and save state file
+                        if key in ACTIVE_TRACKS:
+                            del ACTIVE_TRACKS[key]
+                        save_active_jobs(ACTIVE_TRACKS)
+
+                        # Send final wrap-up notification to user (no siren or target alert)
+                        end_msg = (
+                            f"🏁 <b>MATCH ENDED!</b>\n\n"
+                            f"The tracked match for <b>{html.escape(target_display)}</b> has concluded (<i>{html.escape(str(match_summary))}</i>) without hitting your target odd ({target_val:.2f}).\n\n"
+                            f"Tracking session closed automatically."
+                        )
+                        await asyncio.to_thread(self.client.send_message, chat_id, end_msg, "HTML", False)
+                        break
+                    else:
+                        logger.info(f"Match end candidate check {consecutive}/2 for chat {chat_id} ({team_name}). Waiting for confirmation on next tick.")
+                else:
+                    track["consecutive_finished_checks"] = 0
 
                 if latest_odd is not None and isinstance(latest_odd, (int, float)) and latest_odd > 1.01:
                     track["current_odd"] = latest_odd
