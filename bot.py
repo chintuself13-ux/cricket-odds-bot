@@ -10,7 +10,7 @@ import re
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List, Tuple
 
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
@@ -32,12 +32,12 @@ class RenderHealthCheckHandler(BaseHTTPRequestHandler):
 
 
 def start_health_server(port: int):
-    """Start background HTTP health check server on 0.0.0.0:<port>."""
+    """Start background multithreaded HTTP health check server on 0.0.0.0:<port>."""
     try:
-        server = HTTPServer(("0.0.0.0", port), RenderHealthCheckHandler)
+        server = ThreadingHTTPServer(("0.0.0.0", port), RenderHealthCheckHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        logger.info(f"Health check HTTP server listening on 0.0.0.0:{port}")
+        logger.info(f"Multithreaded health check HTTP server listening on 0.0.0.0:{port}")
         return server
     except Exception as e:
         logger.warning(f"Failed to start health check HTTP server on port {port}: {e}")
@@ -318,6 +318,7 @@ class TelegramOddsBot:
         for task in self.tracking_tasks.values():
             task.cancel()
         await self.engine.stop_async()
+        await global_exchange_scraper.close_async()
         if self.health_server:
             try:
                 self.health_server.shutdown()
@@ -905,11 +906,11 @@ class TelegramOddsBot:
                     last_alert_time = 0.0
 
             except Exception as e:
-                logger.warning(f"Polling exception in run_monitor for chat {chat_id}: {e}. Retrying in 3s...")
-                await asyncio.sleep(3.0)
+                logger.warning(f"Polling exception in run_monitor for chat {chat_id}: {e}. Retrying in 5s...")
+                await asyncio.sleep(5.0)
                 continue
 
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(5.0)
 
     async def _cmd_status_async(self, chat_id: str | int):
         if chat_id not in ACTIVE_TRACKS and str(chat_id) not in ACTIVE_TRACKS:

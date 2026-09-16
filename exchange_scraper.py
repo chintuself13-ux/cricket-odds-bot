@@ -77,212 +77,52 @@ class ExchangeScraperEngine:
             "Expires": "0"
         }
         self.manual_overrides: Dict[str, float] = {}
+        self._async_client = None
 
-    def fetch_live_matches(self) -> List[Dict[str, Any]]:
-        """
-        Scrapes https://crex.com/cricket-live-score to discover all currently live in-play matches and their page slugs.
-        Directly extracts ball-by-ball Paresh & Decimal odds from live match JSON state.
-        """
-        url = "https://crex.com/cricket-live-score"
-        req = urllib.request.Request(url, headers=self.http_headers)
-        
-        crex_slugs = []
-        try:
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
-                html_data = resp.read().decode("utf-8", errors="ignore")
-                raw_links = re.findall(r'href="(/cricket-live-score/[a-zA-Z0-9\-]+)"', html_data)
-                crex_slugs = list(dict.fromkeys(raw_links))
-        except Exception as e:
-            logger.warning(f"Failed to fetch live Crex list: {e}")
+    async def get_async_client(self):
+        """Returns or initializes the singleton httpx.AsyncClient with connection pooling."""
+        import httpx
+        if self._async_client is None or self._async_client.is_closed:
+            limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            self._async_client = httpx.AsyncClient(
+                headers=self.http_headers,
+                timeout=6.0,
+                follow_redirects=True,
+                limits=limits
+            )
+        return self._async_client
 
-        matches = []
-        for slug in crex_slugs[:8]:
-            match_data = self._scrape_crex_match_page(slug)
-            if match_data:
-                matches.append(match_data)
-
-        return matches
-
-    def _scrape_crex_match_page(self, slug: str) -> Optional[Dict[str, Any]]:
-        full_url = f"https://crex.com{slug}" if not slug.startswith("http") else slug
-        req = urllib.request.Request(full_url, headers=self.http_headers)
-        
-        try:
-            with urllib.request.urlopen(req, timeout=6.0) as resp:
-                raw_html = resp.read().decode("utf-8", errors="ignore")
-                clean_html = raw_html.replace("&q;", '"').replace("&quot;", '"')
-                
-                title_m = re.search(r'<title>(.*?)</title>', clean_html, re.IGNORECASE)
-                raw_title = title_m.group(1) if title_m else ""
-                title_clean = raw_title.split("|")[0].replace("- CREX", "").strip() if raw_title else slug
-
-                # Extract and clean teams strictly in official fixture order (Home vs Away)
-                teams = []
-                if " vs " in title_clean.lower() or " v " in title_clean.lower():
-                    parts = re.split(r'\s+(?:vs|v)\s+', title_clean, flags=re.IGNORECASE)
-                    c1 = self._clean_team_name(parts[0])
-                    c2 = self._clean_team_name(parts[1]) if len(parts) > 1 else ""
-                    if c1 and c2:
-                        teams = [c1, c2]
-
-                if len(teams) < 2:
-                    clean_slug = slug.replace("/cricket-live-score/", "").split("-match-updates-")[0]
-                    slug_parts = re.split(r'-vs-|-v-', clean_slug, flags=re.IGNORECASE)
-                    if len(slug_parts) >= 2:
-                        t1_raw = slug_parts[0].replace("-", " ")
-                        t2_raw = re.sub(r'-\d+(st|nd|rd|th)?-.*$', '', slug_parts[1]).replace("-", " ")
-                        c1 = self._clean_team_name(t1_raw)
-                        c2 = self._clean_team_name(t2_raw)
-                        if c1 and c2:
-                            teams = [c1, c2]
-
-                team1 = teams[0] if len(teams) > 0 else "Team 1"
-                team2 = teams[1] if len(teams) > 1 else "Team 2"
-
-                team1 = self._clean_team_name(team1)
-                team2 = self._clean_team_name(team2)
-
-                if not team1 or not team2 or team1.strip().lower() == team2.strip().lower():
-                    return None
-
-                t1_override = self._get_override(team1)
-                t2_override = self._get_override(team2)
-
-                # Parse live R field (Paresh rate) from Crex getSV3 live JSON state
-                r_match = re.search(r'"R"\s*:\s*"(\d+)\+(\d+)"', clean_html)
-                if r_match:
-                    p_back = float(r_match.group(1))
-                    offset = float(r_match.group(2))
-                    p_lay = p_back + offset
-                    fav_back = round(1.0 + (p_back / 100.0), 2)
-                    fav_lay = round(1.0 + (p_lay / 100.0), 2)
-                else:
-                    fav_back, fav_lay = 1.12, 1.13
-
-                # Calculate underdog odds dynamically from favorite odds (no static/cached rates)
-                if fav_back <= 1.12:
-                    dog_back, dog_lay = 8.50, 9.00
-                else:
-                    fav_prob = 1.0 / max(1.01, fav_lay)
-                    dog_prob_back = max(0.02, 1.0 - fav_prob - 0.003)
-                    dog_prob_lay = max(0.02, 1.0 - (1.0 / max(1.01, fav_back)) + 0.008)
-
-                    dog_back = round(1.0 / dog_prob_back, 2)
-                    dog_lay = round(1.0 / dog_prob_lay, 2)
-                    if dog_lay <= dog_back:
-                        dog_lay = round(dog_back + 0.50, 2)
-
-                if "zim" in team1.lower():
-                    t1_back = t1_override or dog_back
-                    t1_lay = round(t1_back + 0.50, 2)
-                    t2_back = t2_override or fav_back
-                    t2_lay = fav_lay
-                else:
-                    t1_back = t1_override or fav_back
-                    t1_lay = fav_lay
-                    t2_back = t2_override or dog_back
-                    t2_lay = round(t2_back + 0.50, 2)
-
-                odds_arr = [
-                    {
-                        "name": team1,
-                        "back": t1_back,
-                        "lay": t1_lay,
-                        "price": t1_back,
-                        "win_prob": round((1.0 / max(0.01, t1_back)) * 100, 1),
-                        "indian_odds": format_indian_odds(t1_back, t1_lay)
-                    },
-                    {
-                        "name": team2,
-                        "back": t2_back,
-                        "lay": t2_lay,
-                        "price": t2_back,
-                        "win_prob": round((1.0 / max(0.01, t2_back)) * 100, 1),
-                        "indian_odds": format_indian_odds(t2_back, t2_lay)
-                    }
-                ]
-
-                sorted_odds = sorted(odds_arr, key=lambda x: x["back"])
-                fav = sorted_odds[0]
-                underdog = sorted_odds[1]
-
-                fav_target_odd = round(max(1.02, fav["back"] - 0.07), 2)
-                underdog_target_odd = round(max(1.10, underdog["back"] * 0.53), 2)
-
-                return {
-                    "id": slug,
-                    "title": f"{team1} vs {team2}",
-                    "sport": "Crex Live Score",
-                    "status": "In-Play",
-                    "crex_url": full_url,
-                    "home_team": team1,
-                    "away_team": team2,
-                    "odds": odds_arr,
-                    "favorite": fav,
-                    "underdog": underdog,
-                    "recommendations": {
-                        "fav_track_cmd": f"/track {fav['name']} {fav_target_odd:.2f} 1000",
-                        "underdog_track_cmd": f"/track {underdog['name']} {underdog_target_odd:.2f} 1000",
-                        "fav_target_odd": fav_target_odd,
-                        "underdog_target_odd": underdog_target_odd
-                    }
-                }
-        except Exception as e:
-            logger.warning(f"Error scraping Crex match page {slug}: {e}")
-            return None
-
-    def get_live_odd_for_team(self, team_name: str) -> Optional[float]:
-        target_lower = team_name.lower().strip()
-        override = self._get_override(team_name)
-        if override:
-            return override
-
-        matches = self.fetch_live_matches()
-        for m in matches:
-            for outcome in m["odds"]:
-                name = outcome["name"].lower().strip()
-                if target_lower in name or name in target_lower or self._check_alias_match(target_lower, name):
-                    return outcome["back"]
-
-        return None
-
-    def set_team_odd_override(self, team_name: str, new_odd: float):
-        target_lower = team_name.lower().strip()
-        with self._lock:
-            self.manual_overrides[target_lower] = round(float(new_odd), 2)
-
-    def _get_override(self, team_name: str) -> Optional[float]:
-        target_lower = team_name.lower().strip()
-        with self._lock:
-            for k, v in self.manual_overrides.items():
-                if k in target_lower or target_lower in k:
-                    return v
-        return None
+    async def close_async(self):
+        """Closes persistent AsyncClient connection pool."""
+        if self._async_client and not self._async_client.is_closed:
+            try:
+                await self._async_client.aclose()
+            except Exception:
+                pass
+            self._async_client = None
 
     async def fetch_live_matches_async(self) -> List[Dict[str, Any]]:
         """
-        Asynchronously fetches live match data from Crex using httpx.AsyncClient.
+        Asynchronously fetches live match data using singleton httpx.AsyncClient connection pool.
         """
-        import httpx
         url = "https://crex.com/cricket-live-score"
+        client = await self.get_async_client()
         
         crex_slugs = []
         try:
-            async with httpx.AsyncClient(headers=self.http_headers, timeout=6.0, follow_redirects=True) as client:
-                resp = await client.get(url)
-                html_data = resp.text
-                raw_links = re.findall(r'href="(/cricket-live-score/[a-zA-Z0-9\-]+)"', html_data)
-                crex_slugs = list(dict.fromkeys(raw_links))
+            resp = await client.get(url)
+            html_data = resp.text
+            raw_links = re.findall(r'href="(/cricket-live-score/[a-zA-Z0-9\-]+)"', html_data)
+            crex_slugs = list(dict.fromkeys(raw_links))
         except Exception as e:
             logger.warning(f"Async Crex list fetch warning: {e}")
 
         matches = []
         try:
-            async with httpx.AsyncClient(headers=self.http_headers, timeout=6.0, follow_redirects=True) as client:
-                for slug in crex_slugs[:8]:
-                    match_data = await self._scrape_crex_match_page_async(client, slug)
-                    if match_data:
-                        matches.append(match_data)
+            for slug in crex_slugs[:8]:
+                match_data = await self._scrape_crex_match_page_async(client, slug)
+                if match_data:
+                    matches.append(match_data)
         except Exception as e:
             logger.warning(f"Async Crex match page fetch warning: {e}")
 
