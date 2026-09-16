@@ -760,13 +760,9 @@ class TelegramOddsBot:
 
         clean_team = global_exchange_scraper._clean_team_name(raw_team_name)
 
-        live_odd = await global_exchange_scraper.get_live_odd_for_team_async(clean_team)
-        if live_odd is not None and isinstance(live_odd, (int, float)) and live_odd > 1.0:
-            entry_odd = live_odd
-        elif "zim" in clean_team.lower():
-            entry_odd = 8.50
-        else:
-            entry_odd = 1.12
+        odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(clean_team)
+        target_display = (odds_data.get("target_team") or clean_team).upper()
+        entry_odd = odds_data.get("target_odd", 1.12)
 
         lay_stake_proj = round((entry_odd * stake_val) / max(0.01, threshold), 2)
         profit_proj = round(lay_stake_proj - stake_val, 2)
@@ -775,12 +771,15 @@ class TelegramOddsBot:
             "chat_id": chat_id,
             "team": clean_team,
             "team_name": clean_team,
+            "target_team_clean": target_display,
             "target": threshold,
             "target_odd": threshold,
             "entry": entry_odd,
             "entry_odd": entry_odd,
             "current_odd": entry_odd,
             "last_seen_odd": entry_odd,
+            "opponent_team": odds_data.get("opponent_team"),
+            "opponent_odd": odds_data.get("opponent_odd"),
             "stake": stake_val,
             "data_source": "⚡ Live Exchange Feed",
             "start_time": time.time(),
@@ -805,15 +804,23 @@ class TelegramOddsBot:
         ind_target = format_indian_odds(threshold)
         ind_entry = format_indian_odds(entry_odd)
 
+        opp_team = (odds_data.get("opponent_team") or "").upper()
+        opp_odd = odds_data.get("opponent_odd")
+        opp_line = ""
+        if opp_team and isinstance(opp_odd, (int, float)):
+            opp_ind = format_indian_odds(opp_odd)
+            opp_line = f"⚔️ <b>Opponent Odd ({html.escape(opp_team)}):</b> {opp_odd:.2f} (<code>{opp_ind}</code>)\n"
+
         msg = (
             f"🚀 <b>LIVE ODDS TRACKING STARTED!</b>\n\n"
-            f"🎯 <b>Target Team:</b> {clean_team.upper()}\n"
-            f"📊 <b>Entry Odd (Auto):</b> {entry_odd:.2f} (<code>{ind_entry}</code>)\n"
+            f"🎯 <b>Target Team:</b> {html.escape(target_display)}\n"
+            f"📊 <b>Entry Odd ({html.escape(target_display)}):</b> {entry_odd:.2f} (<code>{ind_entry}</code>)\n"
+            f"{opp_line}"
             f"🎯 <b>Target Odd:</b> {threshold:.2f} (<code>{ind_target}</code>)\n"
             f"💵 <b>Invested Stake:</b> ₹{stake_val:,.0f}\n"
             f"📡 <b>Data Source:</b> ⚡ Live Exchange Feed\n"
             f"💰 <b>Projected Green Book Profit:</b> +₹{profit_proj:,.2f} (Both sides equal profit 💚)\n"
-            f"📈 <b>Required Lay Stake at Target:</b> ₹{lay_stake_proj:,.2f}\n\n"
+            f"📈 <b>Required Lay Stake at Target:</b> Lay <b>₹{lay_stake_proj:,.2f}</b> on <b>{html.escape(target_display)}</b> @ {threshold:.2f}\n\n"
             f"⚡ <i>Live market odds monitored in real time. Send <code>/status</code> anytime for instant updates!</i>"
         )
         await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
@@ -834,11 +841,17 @@ class TelegramOddsBot:
             team_name = track.get("team") or track.get("team_name")
 
             try:
-                latest_odd = await global_exchange_scraper.get_live_odd_for_team_async(team_name)
+                odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
+                latest_odd = odds_data.get("target_odd")
 
                 if latest_odd is not None:
                     track["current_odd"] = latest_odd
                     track["last_seen_odd"] = latest_odd
+                    if odds_data.get("opponent_team"):
+                        track["opponent_team"] = odds_data["opponent_team"]
+                        track["opponent_odd"] = odds_data["opponent_odd"]
+                    if odds_data.get("target_team"):
+                        track["target_team_clean"] = odds_data["target_team"]
                     if track.get("entry") is None or not isinstance(track.get("entry"), (int, float)):
                         track["entry"] = latest_odd
                         track["entry_odd"] = latest_odd
@@ -853,6 +866,15 @@ class TelegramOddsBot:
                     if not track.get("muted") and (now - last_alert_time >= 3.0):
                         last_alert_time = now
 
+                        target_display = (track.get("target_team_clean") or team_name).upper()
+                        opp_display = (track.get("opponent_team") or "").upper()
+                        opp_odd = track.get("opponent_odd")
+
+                        opp_line = ""
+                        if opp_display and isinstance(opp_odd, (int, float)):
+                            opp_ind = format_indian_odds(opp_odd)
+                            opp_line = f"⚔️ <b>Opponent Odd ({html.escape(opp_display)}):</b> {opp_odd:.2f} (<code>{opp_ind}</code>)\n"
+
                         entry_val = track.get("entry", curr)
                         stake_val = track.get("stake", 1000.0)
                         lay_stake = round((entry_val * stake_val) / max(0.01, curr), 2)
@@ -861,15 +883,16 @@ class TelegramOddsBot:
 
                         alert_msg = (
                             f"🚨 <b>HIGH PRIORITY ODDS ALERT! TARGET HIT!</b> 🚨\n\n"
-                            f"🎯 <b>Target Team:</b> {html.escape(str(team_name).upper())}\n"
-                            f"📈 <b>Current Live Odd:</b> {curr:.2f} (<code>{ind_odd}</code>) [Target: &lt;= {target_val:.2f}]\n"
+                            f"🎯 <b>Target Team:</b> {html.escape(target_display)}\n"
+                            f"📈 <b>Current Live Odd ({html.escape(target_display)}):</b> {curr:.2f} (<code>{ind_odd}</code>) [Target: &lt;= {target_val:.2f}]\n"
+                            f"{opp_line}"
                             f"📡 <b>Data Source:</b> ⚡ Live Exchange Feed\n"
                             f"📊 <b>Entry Odd (Auto Locked):</b> {entry_val:.2f}\n"
                             f"💵 <b>Invested Stake:</b> ₹{stake_val:,.0f}\n\n"
                             f"💰 <b>GREEN BOOK CASHOUT BREAKDOWN:</b>\n"
-                            f"👉 <b>LAY AMOUNT TO PLACE ON EXCHANGE:</b> Place <b>₹{lay_stake:,.2f} Lay</b> @ {curr:.2f}\n"
+                            f"👉 <b>LAY AMOUNT TO PLACE ON EXCHANGE:</b> Place <b>₹{lay_stake:,.2f} Lay</b> on <b>{html.escape(target_display)}</b> @ {curr:.2f}\n"
                             f"💚 <b>PROJECTED GREEN BOOK PROFIT:</b> <b>+₹{profit:,.2f}</b> (Both sides equal profit)\n\n"
-                            f"⚡ <b>ACTION REQUIRED:</b> Place exact Lay amount of <b>₹{lay_stake:,.2f}</b> on exchange to lock both-side profit immediately!\n\n"
+                            f"⚡ <b>ACTION REQUIRED:</b> Place exact Lay amount of <b>₹{lay_stake:,.2f}</b> on <b>{html.escape(target_display)}</b> @ {curr:.2f} on exchange to lock both-side profit immediately!\n\n"
                             f"Send <code>/mute</code> to silence alerts or <code>/stop</code> to end."
                         )
                         await asyncio.to_thread(self.client.send_message, chat_id, alert_msg, "HTML", False)
@@ -895,6 +918,26 @@ class TelegramOddsBot:
         data = ACTIVE_TRACKS[key]
 
         team_name = data.get("team", data.get("team_name", "Match"))
+        odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
+
+        if odds_data:
+            if isinstance(odds_data.get("target_odd"), (int, float)):
+                data["current_odd"] = odds_data["target_odd"]
+            if odds_data.get("opponent_team"):
+                data["opponent_team"] = odds_data["opponent_team"]
+                data["opponent_odd"] = odds_data["opponent_odd"]
+            if odds_data.get("target_team"):
+                data["target_team_clean"] = odds_data["target_team"]
+
+        target_display = (data.get("target_team_clean") or team_name).upper()
+        opp_display = (data.get("opponent_team") or "").upper()
+        opp_odd = data.get("opponent_odd")
+
+        opp_line = ""
+        if opp_display and isinstance(opp_odd, (int, float)):
+            opp_ind = format_indian_odds(opp_odd)
+            opp_line = f"⚔️ <b>Opponent Odd ({html.escape(opp_display)}):</b> {opp_odd:.2f} (<code>{opp_ind}</code>)\n"
+
         target = data.get("target", data.get("target_odd", 0.0))
         curr = data.get("current_odd", "Fetching...")
         entry = data.get("entry", data.get("entry_odd", target))
@@ -931,13 +974,14 @@ class TelegramOddsBot:
 
         msg = (
             f"📊 <b>LIVE TRACKING STATUS</b>\n\n"
-            f"🎯 <b>Target:</b> {str(team_name).upper()} &lt;= {target:.2f} (<code>{target_ind}</code>){mute_str}\n"
-            f"⚡ <b>Current Live Odd:</b> {curr_str}\n"
+            f"🎯 <b>Target:</b> {html.escape(target_display)} &lt;= {target:.2f} (<code>{target_ind}</code>){mute_str}\n"
+            f"📈 <b>Current Live Odd ({html.escape(target_display)}):</b> {curr_str}\n"
+            f"{opp_line}"
             f"📊 <b>Entry Odd (Auto):</b> {entry_str} | <b>Stake:</b> ₹{stake:,.0f}\n"
             f"📡 <b>Data Source:</b> ⚡ Live Exchange Feed\n"
             f"⏱ <b>Elapsed Tracking Time:</b> {elapsed_str}\n\n"
             f"💰 <b>Live Cashout Calculation:</b>\n"
-            f"👉 Lay <b>₹{lay_stake:,.2f}</b> @ {curr_val:.2f}\n"
+            f"👉 Lay <b>₹{lay_stake:,.2f}</b> on <b>{html.escape(target_display)}</b> @ <b>{curr_val:.2f}</b>\n"
             f"💚 Guaranteed Profit: <b>+₹{profit:,.2f}</b>\n"
             f"Status: {status_icon}"
         )
