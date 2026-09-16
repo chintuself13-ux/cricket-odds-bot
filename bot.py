@@ -638,8 +638,8 @@ class TelegramOddsBot:
             away = m.get("away_team", "").strip()
             if not home or not away or home.lower() == away.lower():
                 continue
-            fav = m.get("favorite")
-            if fav and fav.get("back", 0) > 1.0:
+            odds = m.get("odds", [])
+            if odds and any(o.get("back", 0) > 1.0 for o in odds):
                 matches.append(m)
 
         if not matches:
@@ -649,28 +649,41 @@ class TelegramOddsBot:
 
         lines = []
         for m in matches:
-            fav = m.get("favorite")
-            underdog = m.get("underdog")
-            recs = m.get("recommendations", {})
+            home_team = m.get("home_team", "Team 1")
+            away_team = m.get("away_team", "Team 2")
+            odds_list = m.get("odds", [])
 
-            fav_ind = format_indian_odds(fav['back'], fav['lay']) if fav else ""
-            dog_ind = format_indian_odds(underdog['back'], underdog['lay']) if underdog else ""
+            # Extract home and away odds strictly preserving official fixture order
+            home_odd = next((o for o in odds_list if o.get("name") == home_team), odds_list[0] if len(odds_list) > 0 else None)
+            away_odd = next((o for o in odds_list if o.get("name") == away_team), odds_list[1] if len(odds_list) > 1 else None)
 
-            fav_win = int(round((1.0 / max(1.01, fav['back'])) * 100)) if fav else 0
-            dog_win = int(round((1.0 / max(1.01, underdog['back'])) * 100)) if underdog else 0
+            if not home_odd or not away_odd:
+                continue
 
-            fav_line = f"• {fav['name']} (Fav): {fav_ind} ({fav['back']:.2f} / {fav['lay']:.2f}) | {fav_win}% Win" if fav else ""
-            dog_line = f"• {underdog['name']}: {dog_ind} ({underdog['back']:.2f} / {underdog['lay']:.2f}) | {dog_win}% Win" if underdog else ""
+            # Determine favorite based on lower decimal back odd
+            is_home_fav = home_odd.get("back", 99.0) <= away_odd.get("back", 99.0)
 
-            fav_cmd = recs.get('fav_track_cmd', f"/track {fav['name']} 1.05 1000")
-            dog_cmd = recs.get('underdog_track_cmd', f"/track {underdog['name']} 4.50 1000")
+            home_fav_tag = " (Fav)" if is_home_fav else ""
+            away_fav_tag = " (Fav)" if not is_home_fav else ""
+
+            home_ind = format_indian_odds(home_odd['back'], home_odd['lay'])
+            away_ind = format_indian_odds(away_odd['back'], away_odd['lay'])
+
+            home_win = int(round((1.0 / max(1.01, home_odd['back'])) * 100))
+            away_win = int(round((1.0 / max(1.01, away_odd['back'])) * 100))
+
+            home_line = f"• {home_team}{home_fav_tag}: {home_ind} ({home_odd['back']:.2f} / {home_odd['lay']:.2f}) | {home_win}% Win"
+            away_line = f"• {away_team}{away_fav_tag}: {away_ind} ({away_odd['back']:.2f} / {away_odd['lay']:.2f}) | {away_win}% Win"
+
+            home_target = round(max(1.02, home_odd['back'] - 0.07), 2) if is_home_fav else round(max(1.10, home_odd['back'] * 0.53), 2)
+            away_target = round(max(1.02, away_odd['back'] - 0.07), 2) if not is_home_fav else round(max(1.10, away_odd['back'] * 0.53), 2)
 
             lines.append(
-                f"🏏 <b>{m['home_team']} vs {m['away_team']}</b> (In-Play)\n"
-                f"{fav_line}\n"
-                f"{dog_line}\n\n"
-                f"👉 <code>{fav_cmd}</code>\n"
-                f"👉 <code>{dog_cmd}</code>"
+                f"🏏 <b>{home_team} vs {away_team}</b> (In-Play)\n"
+                f"{home_line}\n"
+                f"{away_line}\n\n"
+                f"👉 <code>/track {home_team} {home_target:.2f} 1000</code>\n"
+                f"👉 <code>/track {away_team} {away_target:.2f} 1000</code>"
             )
 
         await asyncio.to_thread(self.client.send_message, chat_id, "\n\n".join(lines), "HTML", False)

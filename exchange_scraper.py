@@ -24,6 +24,9 @@ TEAM_ABBREVIATIONS = {
     "BAN": "Bangladesh",
     "BARB": "Barbados Royals",
     "JAMA": "Jamaica Tallawahs",
+    "UGN": "Uganda",
+    "BOT": "Botswana",
+    "BOTS": "Botswana",
 }
 
 def convert_paresh_to_decimal(val: float) -> float:
@@ -92,11 +95,6 @@ class ExchangeScraperEngine:
         except Exception as e:
             logger.warning(f"Failed to fetch live Crex list: {e}")
 
-        # Ensure requested live test match URL (11FK) is included
-        test_slug = "/cricket-live-score/aus-vs-zim-1st-odi-australia-tour-of-zimbabwe-2026-match-updates-11FK"
-        if test_slug not in crex_slugs:
-            crex_slugs.insert(0, test_slug)
-
         matches = []
         for slug in crex_slugs[:8]:
             match_data = self._scrape_crex_match_page(slug)
@@ -118,27 +116,34 @@ class ExchangeScraperEngine:
                 raw_title = title_m.group(1) if title_m else ""
                 title_clean = raw_title.split("|")[0].replace("- CREX", "").strip() if raw_title else slug
 
-                # Extract and clean teams strictly
+                # Extract and clean teams strictly in official fixture order (Home vs Away)
                 teams = []
-                if " vs " in title_clean.lower():
-                    parts = re.split(r'\s+vs\s+', title_clean, flags=re.IGNORECASE)
+                if " vs " in title_clean.lower() or " v " in title_clean.lower():
+                    parts = re.split(r'\s+(?:vs|v)\s+', title_clean, flags=re.IGNORECASE)
                     c1 = self._clean_team_name(parts[0])
                     c2 = self._clean_team_name(parts[1]) if len(parts) > 1 else ""
-                    if c1: teams.append(c1)
-                    if c2: teams.append(c2)
+                    if c1 and c2:
+                        teams = [c1, c2]
 
                 if len(teams) < 2:
-                    slug_parts = slug.replace("/cricket-live-score/", "").split("-match-updates-")[0].split("-vs-")
+                    clean_slug = slug.replace("/cricket-live-score/", "").split("-match-updates-")[0]
+                    slug_parts = re.split(r'-vs-|-v-', clean_slug, flags=re.IGNORECASE)
                     if len(slug_parts) >= 2:
-                        c1 = self._clean_team_name(slug_parts[0])
-                        c2 = self._clean_team_name(slug_parts[1].split("-")[0])
-                        teams = [c1 or "Australia", c2 or "Zimbabwe"]
+                        t1_raw = slug_parts[0].replace("-", " ")
+                        t2_raw = re.sub(r'-\d+(st|nd|rd|th)?-.*$', '', slug_parts[1]).replace("-", " ")
+                        c1 = self._clean_team_name(t1_raw)
+                        c2 = self._clean_team_name(t2_raw)
+                        if c1 and c2:
+                            teams = [c1, c2]
 
-                team1 = teams[0] if len(teams) > 0 else "Australia"
-                team2 = teams[1] if len(teams) > 1 else "Zimbabwe"
+                team1 = teams[0] if len(teams) > 0 else "Team 1"
+                team2 = teams[1] if len(teams) > 1 else "Team 2"
 
                 team1 = self._clean_team_name(team1)
                 team2 = self._clean_team_name(team2)
+
+                if not team1 or not team2 or team1.strip().lower() == team2.strip().lower():
+                    return None
 
                 t1_override = self._get_override(team1)
                 t2_override = self._get_override(team2)
@@ -271,10 +276,6 @@ class ExchangeScraperEngine:
         except Exception as e:
             logger.warning(f"Async Crex list fetch warning: {e}")
 
-        test_slug = "/cricket-live-score/aus-vs-zim-1st-odi-australia-tour-of-zimbabwe-2026-match-updates-11FK"
-        if test_slug not in crex_slugs:
-            crex_slugs.insert(0, test_slug)
-
         matches = []
         try:
             async with httpx.AsyncClient(headers=self.http_headers, timeout=6.0, follow_redirects=True) as client:
@@ -303,25 +304,32 @@ class ExchangeScraperEngine:
             title_clean = raw_title.split("|")[0].replace("- CREX", "").strip() if raw_title else slug
 
             teams = []
-            if " vs " in title_clean.lower():
-                parts = re.split(r'\s+vs\s+', title_clean, flags=re.IGNORECASE)
+            if " vs " in title_clean.lower() or " v " in title_clean.lower():
+                parts = re.split(r'\s+(?:vs|v)\s+', title_clean, flags=re.IGNORECASE)
                 c1 = self._clean_team_name(parts[0])
                 c2 = self._clean_team_name(parts[1]) if len(parts) > 1 else ""
-                if c1: teams.append(c1)
-                if c2: teams.append(c2)
+                if c1 and c2:
+                    teams = [c1, c2]
 
             if len(teams) < 2:
-                slug_parts = slug.replace("/cricket-live-score/", "").split("-match-updates-")[0].split("-vs-")
+                clean_slug = slug.replace("/cricket-live-score/", "").split("-match-updates-")[0]
+                slug_parts = re.split(r'-vs-|-v-', clean_slug, flags=re.IGNORECASE)
                 if len(slug_parts) >= 2:
-                    c1 = self._clean_team_name(slug_parts[0])
-                    c2 = self._clean_team_name(slug_parts[1].split("-")[0])
-                    teams = [c1 or "Australia", c2 or "Zimbabwe"]
+                    t1_raw = slug_parts[0].replace("-", " ")
+                    t2_raw = re.sub(r'-\d+(st|nd|rd|th)?-.*$', '', slug_parts[1]).replace("-", " ")
+                    c1 = self._clean_team_name(t1_raw)
+                    c2 = self._clean_team_name(t2_raw)
+                    if c1 and c2:
+                        teams = [c1, c2]
 
-            team1 = teams[0] if len(teams) > 0 else "Australia"
-            team2 = teams[1] if len(teams) > 1 else "Zimbabwe"
+            team1 = teams[0] if len(teams) > 0 else "Team 1"
+            team2 = teams[1] if len(teams) > 1 else "Team 2"
 
             team1 = self._clean_team_name(team1)
             team2 = self._clean_team_name(team2)
+
+            if not team1 or not team2 or team1.strip().lower() == team2.strip().lower():
+                return None
 
             t1_override = self._get_override(team1)
             t2_override = self._get_override(team2)
@@ -431,41 +439,34 @@ class ExchangeScraperEngine:
         # Strip HTML tags
         s = re.sub(r'<[^>]+>', '', name)
         
-        # Truncate at commentary / player stats markers
-        s = re.split(r'\b(opt to|need|runs|wickets|overs|v|vs|scorecard|commentary|live|highlight|won|lost|by|playing|toss)\b', s, flags=re.IGNORECASE)[0]
+        # Cut off at live score patterns (e.g. 119-8, 18-1, 0-0, 20.0) or commentary markers
+        s = re.split(
+            r'\b\d+[\/\-]\d+\b|\b\d+\.\d+\b|\b\d+\s*\(|\b(opt to|need|runs|wickets|overs|scorecard|commentary|live score|highlight|won|lost|by|playing|toss)\b',
+            s,
+            flags=re.IGNORECASE
+        )[0]
         
-        # Strip player scores like 45*, 100(50), 45*(30)
-        s = re.sub(r'\b\d+\*?(\(\d+\))?\b', ' ', s)
-        # Strip scores like 344/5, 120/10, 344-5, 344/5d
-        s = re.sub(r'\b\d+[\/\-]\d+[a-z]?\b', ' ', s, flags=re.IGNORECASE)
-        # Strip overs like (50.0), (50 ov), 50.2 ov, 50 ov, (50.0 ov)
-        s = re.sub(r'\(?\b\d+(\.\d+)?\s*(ov|overs?|o)?\)?', ' ', s, flags=re.IGNORECASE)
-        # Strip match numbers & formats like 1st ODI, 2nd T20I, 3rd Test, Match 15, Live Scorecard, etc.
-        s = re.sub(r'\b\d+(st|nd|rd|th)?\s*(ODI|T20I?|T20|Test|Match|ODI Match)\b', ' ', s, flags=re.IGNORECASE)
+        # Strip match format descriptors & ordinals (e.g. 1st ODI, 2nd T20I, 3rd Test, Match 15, 4th-odi, 15th-)
+        s = re.sub(r'\b\d+(st|nd|rd|th)?([\s\-]+(ODI|T20I?|T20|Test|Match|ODI Match))?\b', ' ', s, flags=re.IGNORECASE)
         s = re.sub(r'\b(Live Score|Match Updates|Live Cricket Score|CREX|Live Scorecard|Scorecard|Updates|Match|Tour|Series|In-Play|In Play)\b', ' ', s, flags=re.IGNORECASE)
-        # Strip remaining numbers, punctuation, brackets
-        s = re.sub(r'[\d\-\(\)\.\,\:\;\|\/]+', ' ', s)
+        
+        # Strip unwanted punctuation (keep letters, numbers, spaces, hyphens)
+        s = re.sub(r'[^\w\s\-]', ' ', s)
         
         words = s.strip().split()
         if not words:
             return name.strip()
             
-        first_word_upper = words[0].upper()
-        if first_word_upper in TEAM_ABBREVIATIONS:
-            return TEAM_ABBREVIATIONS[first_word_upper]
+        # Expand standalone abbreviation if single word match
+        if len(words) == 1 and words[0].upper() in TEAM_ABBREVIATIONS:
+            return TEAM_ABBREVIATIONS[words[0].upper()]
             
-        full_upper = " ".join(words).upper()
-        if full_upper in TEAM_ABBREVIATIONS:
-            return TEAM_ABBREVIATIONS[full_upper]
-            
-        # Check if any word is a recognized team abbreviation
-        for w in words:
-            w_upper = w.upper()
-            if w_upper in TEAM_ABBREVIATIONS:
-                return TEAM_ABBREVIATIONS[w_upper]
-
-        clean_words = words[:2] if len(words) >= 2 and words[0].lower() in ["south", "west", "new", "sri", "hong"] else words[:1]
-        return " ".join(w.capitalize() for w in clean_words)
+        # Reconstruct full team name preserving all words and numbers (e.g. "Pakistan U19", "Botswana", "West Indies Women")
+        cleaned = " ".join(
+            TEAM_ABBREVIATIONS[w.upper()] if w.upper() in TEAM_ABBREVIATIONS else (w.upper() if w.upper() in ["U19", "U23", "T20", "ODI", "XI"] else w.capitalize())
+            for w in words
+        )
+        return cleaned
 
     @staticmethod
     def _normalize_team(name: str) -> str:
