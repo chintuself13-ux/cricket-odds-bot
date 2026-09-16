@@ -139,6 +139,20 @@ class TelegramBotClient:
         }
         return self._make_request("sendPhoto", json_payload=payload)
 
+    def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str = "",
+        show_alert: bool = False
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Answer callback query from inline keyboard button press."""
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        if show_alert:
+            payload["show_alert"] = True
+        return self._make_request("answerCallbackQuery", json_payload=payload)
+
     def _make_request(
         self,
         endpoint: str,
@@ -435,6 +449,25 @@ class TelegramOddsBot:
         asyncio.run(self.stop_async())
 
     def _handle_update(self, update: Dict[str, Any]):
+        callback_query = update.get("callback_query")
+        if callback_query:
+            cb_id = callback_query.get("id")
+            cb_data = callback_query.get("data", "")
+            msg = callback_query.get("message", {})
+            chat_id = msg.get("chat", {}).get("id")
+
+            if cb_id:
+                asyncio.create_task(asyncio.to_thread(
+                    self.client.answer_callback_query,
+                    cb_id,
+                    text="🛑 Siren Alarm Stopped!",
+                    show_alert=True
+                ))
+
+            if cb_data in ["stop_alarm", "mute_alarm", "stop_tracking"] and chat_id:
+                asyncio.create_task(self._cmd_stop_async(chat_id, []))
+            return
+
         message = update.get("message")
         if not message:
             return
@@ -949,8 +982,16 @@ class TelegramOddsBot:
         self.tracking_tasks[task_key] = asyncio.create_task(self.run_monitor(chat_id))
 
     async def run_monitor(self, chat_id: str | int):
-        logger.info(f"Started run_monitor background task for chat {chat_id}")
+        logger.info(f"Started run_monitor Siren Alarm task for chat {chat_id}")
         last_alert_time = 0.0
+
+        stop_keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🛑 STOP ALARM", "callback_data": "stop_alarm"}
+                ]
+            ]
+        }
 
         while self.running and (chat_id in ACTIVE_TRACKS or str(chat_id) in ACTIVE_TRACKS):
             try:
@@ -979,15 +1020,16 @@ class TelegramOddsBot:
                 # 2. Check threshold trigger ONLY if real valid numeric odd (> 1.01) is scraped
                 curr = track.get("current_odd")
                 target_val = track.get("target", track.get("target_odd", 0.0))
+                target_display = (track.get("target_team_clean") or team_name).upper()
 
                 if curr is not None and isinstance(curr, (int, float)) and curr > 1.01 and curr <= target_val:
                     track["status"] = "TRIGGERED"
                     now = time.time()
 
-                    if not track.get("muted") and (now - last_alert_time >= 3.0):
+                    # Repeat alert every 8 seconds (Rate-Limit Safety) when not muted
+                    if not track.get("muted") and (now - last_alert_time >= 8.0):
                         last_alert_time = now
 
-                        target_display = (track.get("target_team_clean") or team_name).upper()
                         opp_display = (track.get("opponent_team") or "").upper()
                         opp_odd = track.get("opponent_odd")
 
@@ -1003,7 +1045,7 @@ class TelegramOddsBot:
                         ind_odd = format_indian_odds(curr)
 
                         alert_msg = (
-                            f"🚨 <b>HIGH PRIORITY ODDS ALERT! TARGET HIT!</b> 🚨\n\n"
+                            f"🚨 <b>SIREN ALARM MODE: TARGET HIT!</b> 🚨\n\n"
                             f"🎯 <b>Target Team:</b> {html.escape(target_display)}\n"
                             f"📈 <b>Current Live Odd ({html.escape(target_display)}):</b> {curr:.2f} (<code>{ind_odd}</code>) [Target: &lt;= {target_val:.2f}]\n"
                             f"{opp_line}"
@@ -1013,11 +1055,28 @@ class TelegramOddsBot:
                             f"💰 <b>GREEN BOOK CASHOUT BREAKDOWN:</b>\n"
                             f"👉 <b>LAY AMOUNT TO PLACE ON EXCHANGE:</b> Place <b>₹{lay_stake:,.2f} Lay</b> on <b>{html.escape(target_display)}</b> @ {curr:.2f}\n"
                             f"💚 <b>PROJECTED GREEN BOOK PROFIT:</b> <b>+₹{profit:,.2f}</b> (Both sides equal profit)\n\n"
-                            f"⚡ <b>ACTION REQUIRED:</b> Place exact Lay amount of <b>₹{lay_stake:,.2f}</b> on <b>{html.escape(target_display)}</b> @ {curr:.2f} on exchange to lock both-side profit immediately!\n\n"
-                            f"Send <code>/mute</code> to silence alerts or <code>/stop</code> to end."
+                            f"⚡ <b>ACTION REQUIRED:</b> Place exact Lay amount of <b>₹{lay_stake:,.2f}</b> on <b>{html.escape(target_display)}</b> @ {curr:.2f} to lock profit!\n\n"
+                            f"🔔 <i>Siren Alarm repeating every 8 seconds until silenced. Tap button below or send <code>/stop</code> to end.</i>"
                         )
-                        await asyncio.to_thread(self.client.send_message, chat_id, alert_msg, "HTML", False)
+                        await asyncio.to_thread(
+                            self.client.send_message,
+                            chat_id,
+                            alert_msg,
+                            "HTML",
+                            False,
+                            stop_keyboard
+                        )
                 else:
+                    # Rebound detection: if odds bounce back ABOVE target threshold
+                    if track.get("status") == "TRIGGERED" and curr is not None and isinstance(curr, (int, float)) and curr > target_val:
+                        ind_curr = format_indian_odds(curr)
+                        rebound_msg = (
+                            f"ℹ️ <b>SIREN ALARM PAUSED — ODDS REBOUNDED ABOVE TARGET</b>\n\n"
+                            f"📈 <b>Current Live Odd ({html.escape(target_display)}):</b> <b>{curr:.2f}</b> (<code>{ind_curr}</code>) &gt; Target {target_val:.2f}\n"
+                            f"⚡ <i>Live rate bounced back above target. Siren paused, back to passive monitoring.</i>"
+                        )
+                        await asyncio.to_thread(self.client.send_message, chat_id, rebound_msg, "HTML", False)
+
                     track["status"] = "ACTIVE"
                     last_alert_time = 0.0
 
