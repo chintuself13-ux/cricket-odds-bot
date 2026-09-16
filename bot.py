@@ -695,8 +695,8 @@ class TelegramOddsBot:
                 chat_id,
                 "⚠️ <b>Usage Syntax:</b>\n"
                 "<code>/track &lt;team&gt; &lt;target_odd&gt; [stake]</code>\n\n"
-                "<i>Example:</i> <code>/track Zimbabwe 2.40 1000</code>\n"
-                "<i>Example:</i> <code>/track Australia 1.06 1000</code>",
+                "<i>Example:</i> <code>/track England U19 1.18 1000</code>\n"
+                "<i>Example:</i> <code>/track Zimbabwe 2.40 1000</code>",
                 "HTML", False
             )
             return
@@ -714,26 +714,51 @@ class TelegramOddsBot:
                 chat_id,
                 "⚠️ <b>Usage Syntax:</b>\n"
                 "<code>/track &lt;team&gt; &lt;target_odd&gt; [stake]</code>\n\n"
+                "<i>Example:</i> <code>/track England U19 1.18 1000</code>\n"
                 "<i>Example:</i> <code>/track Zimbabwe 2.40 1000</code>",
                 "HTML", False
             )
             return
 
-        clean_team = global_exchange_scraper._clean_team_name(params[0])
-        thresh_str = params[1]
+        def _parse_num(val_str: str) -> Optional[float]:
+            try:
+                return float(val_str.replace("₹", "").replace("$", ""))
+            except (ValueError, TypeError):
+                return None
 
-        try:
-            threshold = float(thresh_str)
-        except ValueError:
-            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid target odd. Must be a number like <code>2.40</code>.", "HTML", False)
-            return
+        last_num = _parse_num(params[-1])
+        second_last_num = _parse_num(params[-2]) if len(params) >= 3 else None
 
         stake_val = 1000.0
-        if len(params) >= 3:
-            try:
-                stake_val = float(params[2].replace("₹", "").replace("$", ""))
-            except ValueError:
-                pass
+        threshold = None
+
+        if len(params) >= 3 and second_last_num is not None and last_num is not None:
+            threshold = second_last_num
+            stake_val = last_num
+            team_words = params[:-2]
+        elif last_num is not None:
+            threshold = last_num
+            team_words = params[:-1]
+        else:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "❌ Invalid target odd. Must be a number like <code>2.40</code> or <code>1.18</code>.",
+                "HTML", False
+            )
+            return
+
+        raw_team_name = " ".join(team_words).strip()
+        if not raw_team_name:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "❌ Please specify a valid team name.",
+                "HTML", False
+            )
+            return
+
+        clean_team = global_exchange_scraper._clean_team_name(raw_team_name)
 
         live_odd = await global_exchange_scraper.get_live_odd_for_team_async(clean_team)
         if live_odd is not None and isinstance(live_odd, (int, float)) and live_odd > 1.0:
