@@ -31,6 +31,37 @@ class RenderHealthCheckHandler(BaseHTTPRequestHandler):
         pass  # Suppress HTTP server logs to keep console clean
 
 
+def start_keep_alive_ping(port: int):
+    """
+    Background keep-alive thread that sends HTTP GET request to self
+    every 120 seconds (2 minutes) to keep Render network sockets active.
+    """
+    def _ping_loop():
+        ext_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+        if ext_url:
+            ping_target = ext_url
+        else:
+            ping_target = f"http://127.0.0.1:{port}/"
+
+        logger.info(f"Keep-alive self-ping task started targeting {ping_target}")
+        
+        while True:
+            time.sleep(120)
+            try:
+                req = urllib.request.Request(
+                    ping_target,
+                    headers={"User-Agent": "Render-KeepAlive-Ping/1.0"}
+                )
+                with urllib.request.urlopen(req, timeout=10.0) as resp:
+                    resp.read()
+                logger.debug(f"Render self-ping success -> {ping_target}")
+            except Exception as e:
+                logger.debug(f"Render self-ping notice ({ping_target}): {e}")
+
+    thread = threading.Thread(target=_ping_loop, daemon=True)
+    thread.start()
+
+
 def start_health_server(port: int):
     """Start background multithreaded HTTP health check server on 0.0.0.0:<port>."""
     try:
@@ -38,6 +69,9 @@ def start_health_server(port: int):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         logger.info(f"Multithreaded health check HTTP server listening on 0.0.0.0:{port}")
+        
+        # Start lightweight background keep-alive self-ping loop every 2 minutes
+        start_keep_alive_ping(port)
         return server
     except Exception as e:
         logger.warning(f"Failed to start health check HTTP server on port {port}: {e}")
@@ -214,6 +248,49 @@ def save_allowed_users(allowed: Dict[int, Optional[datetime]]):
 
 ALLOWED_USERS: Dict[int, Optional[datetime]] = load_allowed_users()
 
+ACTIVE_JOBS_FILE = "active_job.json"
+
+
+def save_active_jobs(active_tracks: Dict[Any, Dict[str, Any]]):
+    """Saves ACTIVE_TRACKS dictionary to active_job.json for restart persistence."""
+    try:
+        data = {}
+        for key, track in active_tracks.items():
+            clean_item = {}
+            for k, v in track.items():
+                if isinstance(v, (str, int, float, bool, type(None))):
+                    clean_item[k] = v
+            data[str(key)] = clean_item
+
+        with open(ACTIVE_JOBS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not save active_job.json: {e}")
+
+
+def load_active_jobs() -> Dict[Any, Dict[str, Any]]:
+    """Loads saved tracking jobs from active_job.json on startup."""
+    if not os.path.exists(ACTIVE_JOBS_FILE):
+        return {}
+    try:
+        with open(ACTIVE_JOBS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                loaded_tracks = {}
+                for key_str, track in data.items():
+                    if isinstance(track, dict):
+                        try:
+                            key = int(key_str)
+                        except ValueError:
+                            key = key_str
+                        track["chat_id"] = key
+                        loaded_tracks[key] = track
+                logger.info(f"Loaded {len(loaded_tracks)} active tracking sessions from active_job.json")
+                return loaded_tracks
+    except Exception as e:
+        logger.warning(f"Could not load active_job.json: {e}")
+    return {}
+
 
 def parse_duration(duration_str: str) -> Optional[timedelta]:
     s = duration_str.strip().lower()
@@ -297,7 +374,33 @@ class TelegramOddsBot:
         await self.engine.start_async()
         self.running = True
 
-        # 4. Start Telegram Updates Async Polling loop
+        # 4. Reload saved active tracking sessions from active_job.json
+        saved_tracks = load_active_jobs()
+        if saved_tracks:
+            ACTIVE_TRACKS.update(saved_tracks)
+            for chat_id, track in saved_tracks.items():
+                team_name = track.get("team") or track.get("team_name")
+                threshold = track.get("target") or track.get("target_odd", 1.18)
+                stake_val = track.get("stake", 1000.0)
+                entry_odd = track.get("entry") or track.get("entry_odd")
+
+                self.engine.add_track(
+                    chat_id=chat_id,
+                    match_url="exchange",
+                    team_name=team_name,
+                    threshold=threshold,
+                    operator="<=",
+                    poll_interval=2.5,
+                    stake=stake_val,
+                    entry_odd=entry_odd or 1.01
+                )
+
+                task_key = str(chat_id)
+                if task_key not in self.tracking_tasks or self.tracking_tasks[task_key].done():
+                    logger.info(f"Resuming persisted tracking session for chat {chat_id} ({team_name} <= {threshold})")
+                    self.tracking_tasks[task_key] = asyncio.create_task(self.run_monitor(chat_id))
+
+        # 5. Start Telegram Updates Async Polling loop
         try:
             while self.running:
                 ok, updates = await asyncio.to_thread(self.client.get_updates, offset=self.last_update_id + 1, timeout=2)
@@ -801,6 +904,7 @@ class TelegramOddsBot:
             "last_alert_time": 0.0
         }
         ACTIVE_TRACKS[chat_id] = track_entry
+        save_active_jobs(ACTIVE_TRACKS)
 
         self.engine.add_track(
             chat_id=chat_id,
@@ -1025,6 +1129,7 @@ class TelegramOddsBot:
             if team_filter is None or team_filter in str(team_name).lower():
                 removed.append(str(team_name))
                 del ACTIVE_TRACKS[key]
+                save_active_jobs(ACTIVE_TRACKS)
                 if str(key) in self.tracking_tasks:
                     self.tracking_tasks[str(key)].cancel()
                     del self.tracking_tasks[str(key)]
@@ -1047,6 +1152,7 @@ class TelegramOddsBot:
             if team_filter is None or team_filter in str(team_name).lower():
                 data["muted"] = muted
                 updated.append(str(team_name))
+                save_active_jobs(ACTIVE_TRACKS)
 
         self.engine.set_mute(chat_id, team_filter, muted)
 
