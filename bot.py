@@ -9,6 +9,7 @@ import json
 import re
 import urllib.request
 import urllib.parse
+import aiohttp
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List, Tuple
@@ -248,11 +249,11 @@ def save_allowed_users(allowed: Dict[int, Optional[datetime]]):
 
 ALLOWED_USERS: Dict[int, Optional[datetime]] = load_allowed_users()
 
-ACTIVE_JOBS_FILE = "active_job.json"
+ACTIVE_JOBS_FILE = "active_jobs.json"
 
 
 def save_active_jobs(active_tracks: Dict[Any, Dict[str, Any]]):
-    """Saves ACTIVE_TRACKS dictionary to active_job.json for restart persistence."""
+    """Saves ACTIVE_TRACKS dictionary to active_jobs.json for restart persistence."""
     try:
         data = {}
         for key, track in active_tracks.items():
@@ -265,15 +266,16 @@ def save_active_jobs(active_tracks: Dict[Any, Dict[str, Any]]):
         with open(ACTIVE_JOBS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
-        logger.warning(f"Could not save active_job.json: {e}")
+        logger.warning(f"Could not save active_jobs.json: {e}")
 
 
 def load_active_jobs() -> Dict[Any, Dict[str, Any]]:
-    """Loads saved tracking jobs from active_job.json on startup."""
-    if not os.path.exists(ACTIVE_JOBS_FILE):
+    """Loads saved tracking jobs from active_jobs.json on startup."""
+    target_file = ACTIVE_JOBS_FILE if os.path.exists(ACTIVE_JOBS_FILE) else ("active_job.json" if os.path.exists("active_job.json") else None)
+    if not target_file:
         return {}
     try:
-        with open(ACTIVE_JOBS_FILE, "r", encoding="utf-8") as f:
+        with open(target_file, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, dict):
                 loaded_tracks = {}
@@ -285,10 +287,10 @@ def load_active_jobs() -> Dict[Any, Dict[str, Any]]:
                             key = key_str
                         track["chat_id"] = key
                         loaded_tracks[key] = track
-                logger.info(f"Loaded {len(loaded_tracks)} active tracking sessions from active_job.json")
+                logger.info(f"Loaded {len(loaded_tracks)} active tracking sessions from {target_file}")
                 return loaded_tracks
     except Exception as e:
-        logger.warning(f"Could not load active_job.json: {e}")
+        logger.warning(f"Could not load active tracking jobs: {e}")
     return {}
 
 
@@ -1019,6 +1021,10 @@ class TelegramOddsBot:
                     track["status"] = "ACTIVE"
                     last_alert_time = 0.0
 
+            except (RuntimeError, asyncio.CancelledError, aiohttp.ClientError) as e:
+                logger.warning(f"Polling loop closure/network notice for chat {chat_id}: {e}. Retrying in 3s...")
+                await asyncio.sleep(3.0)
+                continue
             except Exception as e:
                 logger.warning(f"Polling exception in run_monitor for chat {chat_id}: {e}. Retrying in 5s...")
                 await asyncio.sleep(5.0)

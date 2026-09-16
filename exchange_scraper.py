@@ -6,6 +6,8 @@ import time
 import random
 import threading
 import logging
+import asyncio
+import aiohttp
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger("ExchangeScraper")
@@ -77,7 +79,7 @@ class ExchangeScraperEngine:
             "Expires": "0"
         }
         self.manual_overrides: Dict[str, float] = {}
-        self._async_client = None
+        self._aiohttp_session: Optional[aiohttp.ClientSession] = None
 
     def _get_override(self, team_name: str) -> Optional[float]:
         if not team_name:
@@ -100,54 +102,77 @@ class ExchangeScraperEngine:
         with self._lock:
             self.manual_overrides.clear()
 
-    async def get_async_client(self):
-        """Returns or initializes the singleton httpx.AsyncClient with connection pooling."""
-        import httpx
-        if self._async_client is None or self._async_client.is_closed:
-            limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-            self._async_client = httpx.AsyncClient(
+    async def get_aiohttp_session(self) -> aiohttp.ClientSession:
+        """Returns or initializes persistent aiohttp.ClientSession bound to active loop."""
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if (
+            self._aiohttp_session is None
+            or self._aiohttp_session.closed
+            or (current_loop and getattr(self._aiohttp_session, "_loop", None) != current_loop)
+        ):
+            connector = aiohttp.TCPConnector(ssl=False, limit=10, keepalive_timeout=30)
+            timeout = aiohttp.ClientTimeout(total=6.0, connect=3.0)
+            self._aiohttp_session = aiohttp.ClientSession(
                 headers=self.http_headers,
-                timeout=6.0,
-                follow_redirects=True,
-                limits=limits
+                connector=connector,
+                timeout=timeout
             )
-        return self._async_client
+        return self._aiohttp_session
 
     async def close_async(self):
-        """Closes persistent AsyncClient connection pool."""
-        if self._async_client and not self._async_client.is_closed:
+        """Closes persistent aiohttp ClientSession connection pool."""
+        if self._aiohttp_session and not self._aiohttp_session.closed:
             try:
-                await self._async_client.aclose()
+                await self._aiohttp_session.close()
             except Exception:
                 pass
-            self._async_client = None
+            self._aiohttp_session = None
+
+    async def _fetch_url_text(self, url: str) -> Optional[str]:
+        try:
+            session = await self.get_aiohttp_session()
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    return await resp.text()
+                return None
+        except (RuntimeError, asyncio.CancelledError, aiohttp.ClientError) as e:
+            logger.warning(f"aiohttp fetch loop notice for {url}: {e}")
+            await asyncio.sleep(3)
+            return None
+        except Exception as e:
+            logger.warning(f"Unexpected fetch error for {url}: {e}")
+            return None
 
     async def fetch_live_matches_async(self) -> List[Dict[str, Any]]:
         """
-        Asynchronously fetches live match data using singleton httpx.AsyncClient connection pool.
+        Asynchronously fetches live match data using persistent aiohttp.ClientSession connection pool.
         """
         url = "https://crex.com/cricket-live-score"
-        client = await self.get_async_client()
-        
-        crex_slugs = []
         try:
-            resp = await client.get(url)
-            html_data = resp.text
+            html_data = await self._fetch_url_text(url)
+            if not html_data:
+                return []
+
             raw_links = re.findall(r'href="(/cricket-live-score/[a-zA-Z0-9\-]+)"', html_data)
             crex_slugs = list(dict.fromkeys(raw_links))
-        except Exception as e:
-            logger.warning(f"Async Crex list fetch warning: {e}")
 
-        matches = []
-        try:
+            matches = []
             for slug in crex_slugs[:8]:
-                match_data = await self._scrape_crex_match_page_async(client, slug)
+                match_data = await self._scrape_crex_match_page_async(slug)
                 if match_data:
                     matches.append(match_data)
+            return matches
+        except (RuntimeError, asyncio.CancelledError, aiohttp.ClientError) as e:
+            logger.warning(f"Async Crex list fetch loop error: {e}. Sleeping 3s...")
+            await asyncio.sleep(3)
+            return []
         except Exception as e:
-            logger.warning(f"Async Crex match page fetch warning: {e}")
-
-        return matches
+            logger.warning(f"Async Crex list fetch warning: {e}")
+            return []
 
     def fetch_live_matches(self) -> List[Dict[str, Any]]:
         """Synchronous wrapper for fetch_live_matches_async."""
@@ -168,12 +193,13 @@ class ExchangeScraperEngine:
             logger.warning(f"Error in sync fetch_live_matches: {e}")
             return []
 
-    async def _scrape_crex_match_page_async(self, client, slug: str) -> Optional[Dict[str, Any]]:
+    async def _scrape_crex_match_page_async(self, slug: str) -> Optional[Dict[str, Any]]:
         full_url = f"https://crex.com{slug}" if not slug.startswith("http") else slug
         
         try:
-            resp = await client.get(full_url)
-            raw_html = resp.text
+            raw_html = await self._fetch_url_text(full_url)
+            if not raw_html:
+                return None
             clean_html = raw_html.replace("&q;", '"').replace("&quot;", '"')
             
             title_m = re.search(r'<title>(.*?)</title>', clean_html, re.IGNORECASE)
