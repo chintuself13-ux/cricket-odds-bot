@@ -501,7 +501,7 @@ class TelegramOddsBot:
                 asyncio.create_task(self._cmd_seturl_async(chat_id, user_id, parts[1:], from_user))
                 return
 
-            if cmd in ["/allow", "/revoke", "/users"]:
+            if cmd in ["/allow", "/revoke", "/users", "/reject", "/msg"]:
                 if not is_admin:
                     asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can use this command.", "HTML", False))
                     return
@@ -511,11 +511,19 @@ class TelegramOddsBot:
                     asyncio.create_task(self._cmd_revoke_async(chat_id, parts[1:]))
                 elif cmd == "/users":
                     asyncio.create_task(self._cmd_users_async(chat_id))
+                elif cmd == "/reject":
+                    asyncio.create_task(self._cmd_reject_async(chat_id, parts[1:]))
+                elif cmd == "/msg":
+                    asyncio.create_task(self._cmd_msg_async(chat_id, parts[1:]))
                 return
 
-            # 2. Public /buy command
+            # 2. Public /buy & /feedback commands
             if cmd == "/buy":
                 asyncio.create_task(self._cmd_buy_async(chat_id))
+                return
+
+            if cmd == "/feedback":
+                asyncio.create_task(self._cmd_feedback_async(chat_id, user_id, from_user, parts[1:]))
                 return
 
             # 3. Access & Timed Expiry Verification for all feature commands
@@ -550,7 +558,7 @@ class TelegramOddsBot:
             elif cmd == "/matches":
                 asyncio.create_task(self._cmd_matches_async(chat_id))
             elif cmd == "/track":
-                asyncio.create_task(self._cmd_track_async(chat_id, parts[1:]))
+                asyncio.create_task(self._cmd_track_async(chat_id, user_id, parts[1:]))
             elif cmd == "/status":
                 asyncio.create_task(self._cmd_status_async(chat_id))
             elif cmd == "/stop":
@@ -580,34 +588,33 @@ class TelegramOddsBot:
         uname = from_user.get("username")
         username = f"@{html.escape(str(uname))}" if uname else "No username"
 
-        # 1. Send welcome & free trial info to user
         user_msg = (
-            f"👋 <b>Welcome to Live Cricket Odds & Alert Bot!</b>\n\n"
-            f"🎁 Get a <b>3-Day Free Trial</b> to track live cricket exchange odds, "
-            f"automated cashout calculations, and high priority alerts!\n\n"
-            f"📩 Admin has been notified to activate your 3-day trial.\n"
-            f"💳 Or send <code>/buy</code> to purchase a 30-day subscription for ₹50."
+            "👋 <b>Welcome to Odds Alert Bot!</b>\n"
+            "Track live exchange rates hands-free. Receive instant loud siren alerts &amp; cashout formulas on target hit.\n\n"
+            "📌 <b>How to use:</b>\n"
+            "1. /matches - View active in-play cricket matches.\n"
+            "2. /track &lt;TEAM&gt; &lt;TARGET&gt; &lt;STAKE&gt; - Lock match &amp; start tracking.\n"
+            "   Example: <code>/track IND 1.45 1000</code>\n"
+            "3. /stop - Stop tracking manually anytime.\n\n"
+            "🎁 <b>Your 3-Day Free Trial Request has been submitted! Admin will activate your access shortly.</b>"
         )
         asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, user_msg, "HTML", False))
 
-        # 2. Notify Admin with 1-tap /allow <user_id> 3d command
-        admin_alert = (
-            f"🔔 <b>NEW USER TRIAL REQUEST!</b>\n\n"
-            f"👤 <b>Name:</b> {full_name}\n"
-            f"🏷️ <b>Username:</b> {username}\n"
-            f"🆔 <b>User ID:</b> <code>{user_id}</code>\n\n"
-            f"👉 Tap to activate 3-Day Trial:\n"
-            f"<code>/allow {user_id} 3d</code>"
+        admin_card = (
+            "🆕 <b>NEW USER TRIAL REQUEST!</b>\n"
+            f"👤 <b>Name:</b> {full_name} | <b>Username:</b> {username}\n"
+            f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
+            f"👉 <b>Approve:</b> <code>/allow {user_id} 3d</code>"
         )
-        asyncio.create_task(asyncio.to_thread(self.client.send_message, DEFAULT_ADMIN_ID, admin_alert, "HTML", False))
+        asyncio.create_task(asyncio.to_thread(self.client.send_message, DEFAULT_ADMIN_ID, admin_card, "HTML", False))
 
     async def _cmd_buy_async(self, chat_id: str | int):
         qr_url = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa=rajdiljeet@fam%26pn=OddsTracker%26am=50%26cu=INR"
         caption = (
-            "💳 Subscription Plan: ₹50 / 30 Days\n"
+            "💳 <b>Subscription Plan: ₹50 / 30 Days</b>\n"
             "UPI ID: <code>rajdiljeet@fam</code> (tap to copy)\n\n"
-            "Scan the QR or copy the UPI ID to pay ₹50.\n"
-            "After payment, send the screenshot or 12-digit UTR number right here in this chat."
+            "Scan the QR or copy the UPI ID to pay ₹50.\n\n"
+            "⚠️ <b>IMPORTANT:</b> Screenshot lene se pehle UPI app me 'View more details' par tap karein aur apna 12-digit UTR / UPI Ref Number screenshot ke sath mandatory submit karein. Bina UTR payment approve nahi hoga."
         )
 
         ok, _ = await asyncio.to_thread(self.client.send_photo, chat_id, qr_url, caption, "HTML")
@@ -747,6 +754,76 @@ class TelegramOddsBot:
         )
         await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
 
+    async def _cmd_reject_async(self, chat_id: str | int, args: list):
+        if not args:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "⚠️ <b>Usage Syntax:</b> <code>/reject &lt;user_id&gt;</code>",
+                "HTML", False
+            )
+            return
+
+        try:
+            target_user_id = int(args[0].strip())
+            reject_msg = "❌ Payment verification failed or funds not received. Please verify your UTR and contact support."
+            ok, info = await asyncio.to_thread(self.client.send_message, target_user_id, reject_msg, "HTML", False)
+            if ok:
+                await asyncio.to_thread(self.client.send_message, chat_id, f"✅ Rejection alert sent to user <code>{target_user_id}</code>.", "HTML", False)
+            else:
+                await asyncio.to_thread(self.client.send_message, chat_id, f"⚠️ Failed to send rejection to <code>{target_user_id}</code>: {info}", "HTML", False)
+        except ValueError:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid User ID.", "HTML", False)
+
+    async def _cmd_msg_async(self, chat_id: str | int, args: list):
+        if len(args) < 2:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "⚠️ <b>Usage Syntax:</b> <code>/msg &lt;user_id&gt; &lt;custom_text&gt;</code>",
+                "HTML", False
+            )
+            return
+
+        try:
+            target_user_id = int(args[0].strip())
+            custom_text = " ".join(args[1:]).strip()
+            ok, info = await asyncio.to_thread(self.client.send_message, target_user_id, custom_text, "HTML", False)
+            if ok:
+                await asyncio.to_thread(self.client.send_message, chat_id, f"✅ Message sent to user <code>{target_user_id}</code>.", "HTML", False)
+            else:
+                await asyncio.to_thread(self.client.send_message, chat_id, f"⚠️ Failed to send message to <code>{target_user_id}</code>: {info}", "HTML", False)
+        except ValueError:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Invalid User ID.", "HTML", False)
+
+    async def _cmd_feedback_async(self, chat_id: str | int, user_id: int, from_user: Dict[str, Any], args: list):
+        feedback_text = " ".join(args).strip()
+        if not feedback_text:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "⚠️ <b>Usage Syntax:</b> <code>/feedback &lt;your message&gt;</code>",
+                "HTML", False
+            )
+            return
+
+        first_name = html.escape(str(from_user.get("first_name", "")))
+        last_name = html.escape(str(from_user.get("last_name", "")))
+        full_name = f"{first_name} {last_name}".strip() or "User"
+        uname = from_user.get("username")
+        username = f"@{html.escape(str(uname))}" if uname else "No username"
+
+        admin_card = (
+            f"💬 <b>NEW USER FEEDBACK:</b>\n"
+            f"From: {full_name} ({username} | <code>{user_id}</code>)\n"
+            f"Message: {html.escape(feedback_text)}\n\n"
+            f"👉 Direct Reply: <code>/msg {user_id} Your reply here</code>"
+        )
+        asyncio.create_task(asyncio.to_thread(self.client.send_message, DEFAULT_ADMIN_ID, admin_card, "HTML", False))
+
+        reply_msg = "✅ Feedback sent to admin. Thank you!"
+        await asyncio.to_thread(self.client.send_message, chat_id, reply_msg, "HTML", False)
+
     async def _cmd_seturl_async(self, chat_id: str | int, user_id: int, args: list, from_user: Dict[str, Any]):
         sender_id = from_user.get("id") if from_user else user_id
         try:
@@ -803,6 +880,8 @@ class TelegramOddsBot:
         admin_extra = (
             "• <code>/allow &lt;user_id&gt; &lt;duration&gt;</code> — Grant access (e.g. <code>/allow 12345678 30d</code>)\n"
             "• <code>/revoke &lt;user_id&gt;</code> — Revoke user authorization\n"
+            "• <code>/reject &lt;user_id&gt;</code> — Reject user payment\n"
+            "• <code>/msg &lt;user_id&gt; &lt;text&gt;</code> — Direct message user\n"
             "• <code>/users</code> — View all active users & remaining days\n"
         ) if is_admin else ""
 
@@ -817,6 +896,7 @@ class TelegramOddsBot:
             "• <code>/matches</code> — View live matches with Win Chance %, Decimal & Indian (Paresh/Lagan) Odds\n"
             "• <code>/status</code> — View active tracked matches, live odds, elapsed time & instant cashout\n"
             "• <code>/buy</code> — View ₹50 subscription plan & payment QR\n"
+            "• <code>/feedback &lt;text&gt;</code> — Send feedback or query to admin\n"
             "• <code>/mute</code> — Silence repeating alert notifications without ending tracking\n"
             "• <code>/unmute</code> — Resume alert notifications\n"
             "• <code>/stop [team]</code> — Stop tracking a match and clear background task\n"
@@ -884,7 +964,7 @@ class TelegramOddsBot:
 
         await asyncio.to_thread(self.client.send_message, chat_id, "\n\n".join(lines), "HTML", False)
 
-    async def _cmd_track_async(self, chat_id: str | int, args: list):
+    async def _cmd_track_async(self, chat_id: str | int, user_id: int, args: list):
         if not args:
             await asyncio.to_thread(
                 self.client.send_message,
@@ -958,6 +1038,7 @@ class TelegramOddsBot:
 
         odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(clean_team)
         target_display = (odds_data.get("target_team") or clean_team).upper()
+        match_slug = odds_data.get("match_slug") or odds_data.get("match_id") or odds_data.get("id")
         entry_odd = odds_data.get("target_odd")
         if entry_odd is not None and not (isinstance(entry_odd, (int, float)) and entry_odd > 1.01):
             entry_odd = None
@@ -979,6 +1060,7 @@ class TelegramOddsBot:
             "team": clean_team,
             "team_name": clean_team,
             "target_team_clean": target_display,
+            "match_slug": match_slug,
             "target": threshold,
             "target_odd": threshold,
             "entry": entry_odd,
@@ -993,10 +1075,17 @@ class TelegramOddsBot:
             "muted": False,
             "status": "ACTIVE",
             "operator": "<=",
-            "last_alert_time": 0.0
+            "last_alert_time": 0.0,
+            "has_triggered": False,
+            "frozen_since": None
         }
         ACTIVE_TRACKS[chat_id] = track_entry
         save_active_jobs(ACTIVE_TRACKS)
+
+        # Silent Telemetry Log to Admin for Trial User Activity
+        if user_id != DEFAULT_ADMIN_ID:
+            telemetry_msg = f"👤 [Trial Activity] User <code>{user_id}</code> started tracking: {html.escape(target_display)} @ target {threshold:.2f}."
+            asyncio.create_task(asyncio.to_thread(self.client.send_message, DEFAULT_ADMIN_ID, telemetry_msg, "HTML", True))
 
         self.engine.add_track(
             chat_id=chat_id,
@@ -1055,52 +1144,70 @@ class TelegramOddsBot:
                 key = chat_id if chat_id in ACTIVE_TRACKS else str(chat_id)
                 track = ACTIVE_TRACKS[key]
                 team_name = track.get("team") or track.get("team_name")
+                match_slug = track.get("match_slug")
 
-                # 1. Fetch live odds
-                odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
+                # 1. Fetch live odds strictly locked to match_slug if available
+                if match_slug:
+                    odds_data = await global_exchange_scraper.get_live_odds_data_for_match_slug_async(match_slug, team_name)
+                else:
+                    odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
+
                 latest_odd = odds_data.get("target_odd") if odds_data else None
 
-                # RULE 2: GUARD ACTIVE ODDS - If live numeric odds exist, NEVER trigger MATCH ENDED!
+                # Check Condition A & Condition B for Dual-Condition Auto Match-End
+                is_finished = odds_data.get("is_finished") if odds_data else False
+                status_str = (odds_data.get("status") or "").lower() if odds_data else ""
+                
+                # Active odds guard: if latest_odd > 1.01, match is definitely LIVE!
                 if latest_odd is not None and isinstance(latest_odd, (int, float)) and latest_odd > 1.01:
                     is_finished = False
-                    track["consecutive_finished_checks"] = 0
+                    track["frozen_since"] = None
                 else:
-                    is_finished = odds_data.get("is_finished") if odds_data else False
-                    status_str = (odds_data.get("status") or "").lower() if odds_data else ""
-                    strict_kw = ["won by", "match ended", "match finished", "match abandoned", "no result", "match tied"]
-                    if not is_finished and any(kw in status_str for kw in strict_kw):
-                        is_finished = True
+                    if track.get("frozen_since") is None:
+                        track["frozen_since"] = time.time()
 
-                # RULE 3: PREVENT INSTANT TRIGGER - Require at least 2 consecutive checks where odds are absent AND status is finished
-                if is_finished and (latest_odd is None or not isinstance(latest_odd, (int, float)) or latest_odd <= 1.01):
-                    consecutive = track.get("consecutive_finished_checks", 0) + 1
-                    track["consecutive_finished_checks"] = consecutive
-                    
-                    if consecutive >= 2:
-                        logger.info(f"Match ended confirmed (2 consecutive checks) for chat {chat_id} ({team_name}). Cleaning up tracking task automatically.")
-                        target_display = (track.get("target_team_clean") or team_name).upper()
-                        target_val = track.get("target", track.get("target_odd", 0.0))
-                        match_summary = odds_data.get("status") if odds_data and odds_data.get("status") not in ["In-Play", "Finished"] else "Match Concluded"
+                cond_a = (latest_odd is None or not isinstance(latest_odd, (int, float)) or latest_odd <= 1.01)
 
-                        if key in ACTIVE_TRACKS:
-                            del ACTIVE_TRACKS[key]
-                        if chat_id in ACTIVE_TRACKS:
-                            del ACTIVE_TRACKS[chat_id]
-                        save_active_jobs(ACTIVE_TRACKS)
-                        self.engine.remove_track(chat_id)
+                strict_finished_kws = ["won", "finished", "concluded", "result", "match ended", "abandoned", "no result"]
+                status_finished = is_finished or any(kw in status_str for kw in strict_finished_kws)
+                frozen_duration = (time.time() - track["frozen_since"]) if track.get("frozen_since") else 0
+                cond_b = status_finished or (frozen_duration >= 300)
 
-                        # Send required exact match end notification
+                if cond_a and cond_b:
+                    logger.info(f"Dual-condition match-end met for chat {chat_id} ({team_name}). Cleaning up tracking task automatically.")
+                    target_val = track.get("target", track.get("target_odd", 0.0))
+                    target_display = (track.get("target_team_clean") or team_name).upper()
+                    has_triggered = track.get("has_triggered", False)
+
+                    # Hard Auto-Kill Action: Purge session state & remove engine track
+                    if key in ACTIVE_TRACKS:
+                        del ACTIVE_TRACKS[key]
+                    if chat_id in ACTIVE_TRACKS:
+                        del ACTIVE_TRACKS[chat_id]
+                    save_active_jobs(ACTIVE_TRACKS)
+                    self.engine.remove_track(chat_id)
+
+                    # Conditional Notification
+                    if not has_triggered:
+                        winner_name = odds_data.get("winner") if odds_data else None
+                        if not winner_name:
+                            winner_name = target_display
+                        else:
+                            winner_name = winner_name.upper()
+
                         end_msg = (
-                            "🏁 <b>MATCH ENDED!</b>\n"
-                            "The tracked match has concluded without hitting your target odd.\n"
-                            "Tracking session closed automatically."
+                            f"🏁 <b>MATCH CONCLUDED!</b>\n"
+                            f"🏆 <b>Winner:</b> {html.escape(winner_name)} won the match.\n"
+                            f"⚠️ Target odd ({target_val:.2f}) was not reached.\n"
+                            f"🛑 Live tracking session has ended and memory cleared."
                         )
                         await asyncio.to_thread(self.client.send_message, chat_id, end_msg, "HTML", False)
-                        break
-                    else:
-                        logger.info(f"Match end candidate check {consecutive}/2 for chat {chat_id} ({team_name}). Waiting for confirmation on next tick.")
-                else:
-                    track["consecutive_finished_checks"] = 0
+
+                    task_key = str(chat_id)
+                    if task_key in self.tracking_tasks:
+                        task = self.tracking_tasks.pop(task_key)
+                        task.cancel()
+                    break
 
                 if latest_odd is not None and isinstance(latest_odd, (int, float)) and latest_odd > 1.01:
                     track["current_odd"] = latest_odd
@@ -1110,12 +1217,13 @@ class TelegramOddsBot:
                         track["opponent_odd"] = odds_data["opponent_odd"]
                     if odds_data.get("target_team"):
                         track["target_team_clean"] = odds_data["target_team"]
+                    if odds_data.get("match_slug"):
+                        track["match_slug"] = odds_data["match_slug"]
                     if track.get("entry") is None or not isinstance(track.get("entry"), (int, float)) or track.get("entry") <= 1.01:
                         track["entry"] = latest_odd
                         track["entry_odd"] = latest_odd
                 else:
                     track["current_odd"] = None
-                    logger.info(f"Waiting for valid live odds for chat {chat_id} ({team_name}). Maintaining active tracking state.")
 
                 # 2. Check threshold trigger ONLY if real valid numeric odd (> 1.01) is scraped
                 curr = track.get("current_odd")
@@ -1124,6 +1232,7 @@ class TelegramOddsBot:
 
                 if curr is not None and isinstance(curr, (int, float)) and curr > 1.01 and curr <= target_val:
                     track["status"] = "TRIGGERED"
+                    track["has_triggered"] = True
                     now = time.time()
 
                     # Repeat alert every 8 seconds (Rate-Limit Safety) when not muted

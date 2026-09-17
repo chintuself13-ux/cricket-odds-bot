@@ -8,7 +8,7 @@ import threading
 import logging
 import asyncio
 import aiohttp
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger("ExchangeScraper")
 
@@ -118,6 +118,7 @@ class ExchangeScraperEngine:
         }
         self.manual_overrides: Dict[str, float] = {}
         self._aiohttp_session: Optional[aiohttp.ClientSession] = None
+        self._odds_delta_history: Dict[str, Dict[str, Any]] = {}
 
     def _get_override(self, team_name: str) -> Optional[float]:
         if not team_name:
@@ -185,13 +186,101 @@ class ExchangeScraperEngine:
             logger.warning(f"Unexpected fetch error for {url}: {e}")
             return None
 
+    async def _fetch_url_text_with_retry(self, url: str, max_retries: int = 3, base_delay: float = 1.5) -> Optional[str]:
+        """
+        Primary Feed Retention: Retry up to 3 times with exponential backoff (1.5s delay multiplier)
+        before falling back.
+        """
+        for attempt in range(max_retries):
+            res = await self._fetch_url_text(url)
+            if res:
+                return res
+            if attempt < max_retries - 1:
+                delay = base_delay * (1.5 ** attempt)
+                logger.info(f"Primary feed retry {attempt + 1}/{max_retries} for {url} in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+        return None
+
+    def _extract_relative_dom_odds(self, clean_html: str, team1: str, team2: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+        """
+        Relative Traversal: Locates target team's specific label node first in HTML DOM,
+        then strictly queries its immediate sibling/child odds element within next 400 chars.
+        Never assigns odds based on array indexes.
+        Returns (team1_back, team1_lay, team2_back, team2_lay).
+        """
+        t1_b, t1_l, t2_b, t2_l = None, None, None, None
+        
+        for t_name, is_t1 in [(team1, True), (team2, False)]:
+            if not t_name:
+                continue
+            pattern = re.escape(t_name)
+            for m in re.finditer(pattern, clean_html, re.IGNORECASE):
+                start = m.start()
+                snippet = clean_html[start:start + 400]
+                rate_matches = re.findall(r'\b(1\.\d{2}|[2-9]\.\d{2}|[1-9]\d\.\d{2})\b', snippet)
+                if rate_matches:
+                    try:
+                        b_val = float(rate_matches[0])
+                        l_val = float(rate_matches[1]) if len(rate_matches) > 1 else round(b_val + 0.02, 2)
+                        if is_t1:
+                            t1_b, t1_l = b_val, l_val
+                        else:
+                            t2_b, t2_l = b_val, l_val
+                        break
+                    except (ValueError, IndexError):
+                        pass
+
+        return t1_b, t1_l, t2_b, t2_l
+
+    def validate_odds_delta(self, match_key: str, new_odd: Optional[float]) -> Optional[float]:
+        """
+        Fallback Odds Delta Sanity Check: If an odd abruptly leaps across the 2.0 boundary
+        within 1 scrape cycle without score change, require 2 consecutive identical ticks
+        before dispatching a target alert to eliminate DOM layout glitches.
+        """
+        if new_odd is None or not isinstance(new_odd, (int, float)) or new_odd <= 1.0:
+            return new_odd
+            
+        with self._lock:
+            history = self._odds_delta_history.get(match_key)
+            if not history:
+                self._odds_delta_history[match_key] = {
+                    "last_accepted": new_odd,
+                    "candidate": new_odd,
+                    "ticks": 1
+                }
+                return new_odd
+                
+            last_accepted = history["last_accepted"]
+            
+            # Check boundary 2.0 leap
+            leap_across_2 = (last_accepted < 2.0 and new_odd >= 2.0) or (last_accepted >= 2.0 and new_odd < 2.0)
+            
+            if leap_across_2:
+                if history["candidate"] == new_odd or abs(history["candidate"] - new_odd) < 0.03:
+                    history["ticks"] += 1
+                else:
+                    history["candidate"] = new_odd
+                    history["ticks"] = 1
+                    
+                if history["ticks"] >= 2:
+                    history["last_accepted"] = new_odd
+                    return new_odd
+                else:
+                    return last_accepted
+            else:
+                history["last_accepted"] = new_odd
+                history["candidate"] = new_odd
+                history["ticks"] = 1
+                return new_odd
+
     async def fetch_live_matches_async(self) -> List[Dict[str, Any]]:
         """
         Asynchronously fetches live match data using persistent aiohttp.ClientSession connection pool.
         """
         url = urllib.parse.urljoin(BASE_URL, "/cricket-live-score")
         try:
-            html_data = await self._fetch_url_text(url)
+            html_data = await self._fetch_url_text_with_retry(url, max_retries=3, base_delay=1.5)
             if not html_data:
                 return []
 
@@ -231,11 +320,17 @@ class ExchangeScraperEngine:
             logger.warning(f"Error in sync fetch_live_matches: {e}")
             return []
 
+    async def scrape_single_match_by_slug_async(self, slug: str) -> Optional[Dict[str, Any]]:
+        """
+        Strict Match-ID / Unique URL Locking: Directly fetches and parses a specific match slug/ID.
+        """
+        return await self._scrape_crex_match_page_async(slug)
+
     async def _scrape_crex_match_page_async(self, slug: str) -> Optional[Dict[str, Any]]:
         full_url = urllib.parse.urljoin(BASE_URL, slug) if not slug.startswith("http") else slug
         
         try:
-            raw_html = await self._fetch_url_text(full_url)
+            raw_html = await self._fetch_url_text_with_retry(full_url, max_retries=3, base_delay=1.5)
             if not raw_html:
                 return None
             clean_html = raw_html.replace("&q;", '"').replace("&quot;", '"')
@@ -278,8 +373,9 @@ class ExchangeScraperEngine:
             # 1. Match status & completion detection (Scoped strictly to main match header / scoreboard container & JSON state only)
             is_finished = False
             status_text = "In-Play"
+            winning_team = None
 
-            # Extract header status elements & JSON status string (do NOT search whole page text)
+            # Extract header status elements & JSON status string
             header_status_match = re.search(
                 r'class="[^"]*(?:match-status|live-status|status-text|header-status|result-text|scoreboard-status|match-header)[^"]*"[^>]*>\s*([^<]+?)\s*</',
                 clean_html,
@@ -312,11 +408,26 @@ class ExchangeScraperEngine:
                 is_finished = True
                 status_text = header_str.strip()
 
+            if is_finished:
+                w_match = re.search(r'([A-Za-z0-9\s\-]+?)\s+(?:won|win|victory)\b', header_str, re.IGNORECASE)
+                if w_match:
+                    possible_w = self._clean_team_name(w_match.group(1))
+                    if possible_w and (self._is_strict_team_match(possible_w, team1) or self._is_strict_team_match(possible_w, team2)):
+                        winning_team = possible_w
+                if not winning_team:
+                    if team1.lower() in header_str.lower() and "won" in header_str.lower():
+                        winning_team = team1
+                    elif team2.lower() in header_str.lower() and "won" in header_str.lower():
+                        winning_team = team2
+
             # 2. Parse live R field (Paresh rate) and favorite team indicator from Crex live JSON state
             r_match = re.search(r'"R"\s*:\s*"(\d+)\+(\d+)"', clean_html)
 
-            # GUARD ACTIVE ODDS: If live R field or odds exist, match is definitely LIVE!
-            if r_match:
+            # Relative DOM odds extraction
+            rel_t1_b, rel_t1_l, rel_t2_b, rel_t2_l = self._extract_relative_dom_odds(clean_html, team1, team2)
+
+            # GUARD ACTIVE ODDS: If live R field or relative odds exist, match is definitely LIVE!
+            if r_match or (rel_t1_b and rel_t2_b):
                 is_finished = False
                 status_text = "In-Play"
             
@@ -330,24 +441,50 @@ class ExchangeScraperEngine:
                 else:
                     fav_team_num = 1
 
-            if r_match:
+            if rel_t1_b and rel_t2_b:
+                t1_back = t1_override or rel_t1_b
+                t1_lay = rel_t1_l or round(t1_back + 0.02, 2)
+                t2_back = t2_override or rel_t2_b
+                t2_lay = rel_t2_l or round(t2_back + 0.02, 2)
+            elif r_match:
                 p_back = float(r_match.group(1))
                 offset = float(r_match.group(2))
                 p_lay = p_back + offset
                 fav_back = round(1.0 + (p_back / 100.0), 2)
                 fav_lay = round(1.0 + (p_lay / 100.0), 2)
+
+                fav_prob = 1.0 / max(1.01, fav_lay)
+                dog_prob_back = max(0.02, 1.0 - fav_prob - 0.003)
+                dog_prob_lay = max(0.02, 1.0 - (1.0 / max(1.01, fav_back)) + 0.008)
+
+                dog_back = round(1.0 / dog_prob_back, 2)
+                dog_lay = round(1.0 / dog_prob_lay, 2)
+                if dog_lay <= dog_back:
+                    dog_lay = round(dog_back + 0.50, 2)
+
+                if fav_team_num == 2:
+                    t1_back = t1_override or dog_back
+                    t1_lay = round(t1_back + 0.50, 2)
+                    t2_back = t2_override or fav_back
+                    t2_lay = fav_lay
+                else:
+                    t1_back = t1_override or fav_back
+                    t1_lay = fav_lay
+                    t2_back = t2_override or dog_back
+                    t2_lay = round(t2_back + 0.50, 2)
             else:
                 fav_back, fav_lay = None, None
-
-            if fav_back is None:
                 if not t1_override and not t2_override:
                     if is_finished:
                         return {
                             "id": slug,
+                            "match_id": slug,
+                            "match_slug": slug,
                             "title": f"{team1} vs {team2}",
                             "sport": "Crex Live Score",
                             "status": status_text,
                             "is_finished": True,
+                            "winner": winning_team,
                             "crex_url": full_url,
                             "home_team": team1,
                             "away_team": team2,
@@ -359,27 +496,9 @@ class ExchangeScraperEngine:
                     return None
                 fav_back = t1_override or t2_override or 1.12
                 fav_lay = round(fav_back + 0.01, 2)
-
-            # Calculate underdog odds dynamically from favorite odds
-            fav_prob = 1.0 / max(1.01, fav_lay)
-            dog_prob_back = max(0.02, 1.0 - fav_prob - 0.003)
-            dog_prob_lay = max(0.02, 1.0 - (1.0 / max(1.01, fav_back)) + 0.008)
-
-            dog_back = round(1.0 / dog_prob_back, 2)
-            dog_lay = round(1.0 / dog_prob_lay, 2)
-            if dog_lay <= dog_back:
-                dog_lay = round(dog_back + 0.50, 2)
-
-            # Strictly assign favourite & underdog rates according to fav_team_num
-            if fav_team_num == 2:
-                t1_back = t1_override or dog_back
-                t1_lay = round(t1_back + 0.50, 2)
-                t2_back = t2_override or fav_back
-                t2_lay = fav_lay
-            else:
                 t1_back = t1_override or fav_back
                 t1_lay = fav_lay
-                t2_back = t2_override or dog_back
+                t2_back = t2_override or round(fav_back + 0.50, 2)
                 t2_lay = round(t2_back + 0.50, 2)
 
             odds_arr = [
@@ -410,10 +529,13 @@ class ExchangeScraperEngine:
 
             return {
                 "id": slug,
+                "match_id": slug,
+                "match_slug": slug,
                 "title": f"{team1} vs {team2}",
                 "sport": "Crex Live Score",
                 "status": status_text,
                 "is_finished": is_finished,
+                "winner": winning_team,
                 "crex_url": full_url,
                 "home_team": team1,
                 "away_team": team2,
@@ -454,6 +576,75 @@ class ExchangeScraperEngine:
 
         return None
 
+    async def get_live_odds_data_for_match_slug_async(self, match_slug: str, team_name: str) -> Dict[str, Any]:
+        """
+        Strictly queries a locked match by its Crex URL slug or Match ID to prevent cross-match odds leakage.
+        """
+        override = self._get_override(team_name)
+        target_clean = self._clean_team_name(team_name).upper()
+
+        m = await self.scrape_single_match_by_slug_async(match_slug)
+        if not m:
+            return await self.get_live_odds_data_for_team_async(team_name)
+
+        odds = m.get("odds", [])
+        is_finished = m.get("is_finished", False)
+        match_status = m.get("status", "In-Play")
+        winning_team = m.get("winner")
+
+        for idx, outcome in enumerate(odds):
+            name = outcome["name"]
+            if self._is_strict_team_match(team_name, name):
+                target_team = outcome["name"]
+                target_odd = override if override else outcome.get("back")
+                
+                # Apply delta sanity check
+                target_odd = self.validate_odds_delta(f"{match_slug}:{target_team}", target_odd)
+                target_lay = outcome.get("lay")
+
+                if target_odd is not None and isinstance(target_odd, (int, float)) and target_odd > 1.01:
+                    is_finished = False
+                    match_status = "In-Play"
+
+                opponent_outcome = odds[1 - idx] if len(odds) > 1 else None
+                opponent_team = opponent_outcome["name"] if opponent_outcome else None
+                opponent_odd = opponent_outcome["back"] if opponent_outcome else None
+                opponent_lay = opponent_outcome.get("lay") if opponent_outcome else None
+
+                return {
+                    "target_team": target_team,
+                    "target_odd": target_odd,
+                    "target_lay": target_lay,
+                    "opponent_team": opponent_team,
+                    "opponent_odd": opponent_odd,
+                    "opponent_lay": opponent_lay,
+                    "match_title": m.get("title"),
+                    "match_slug": m.get("match_slug") or match_slug,
+                    "match_id": m.get("match_id") or match_slug,
+                    "is_finished": is_finished,
+                    "status": match_status,
+                    "winner": winning_team
+                }
+
+        home_t = m.get("home_team", "")
+        away_t = m.get("away_team", "")
+        opp_team = away_t if self._is_strict_team_match(team_name, home_t) else (home_t if self._is_strict_team_match(team_name, away_t) else None)
+
+        return {
+            "target_team": target_clean,
+            "target_odd": override,
+            "target_lay": None,
+            "opponent_team": opp_team,
+            "opponent_odd": None,
+            "opponent_lay": None,
+            "match_title": m.get("title"),
+            "match_slug": m.get("match_slug") or match_slug,
+            "match_id": m.get("match_id") or match_slug,
+            "is_finished": is_finished,
+            "status": match_status,
+            "winner": winning_team
+        }
+
     async def get_live_odds_data_for_team_async(self, team_name: str) -> Dict[str, Any]:
         override = self._get_override(team_name)
         target_clean = self._clean_team_name(team_name).upper()
@@ -467,6 +658,7 @@ class ExchangeScraperEngine:
             odds = m.get("odds", [])
             is_finished = m.get("is_finished", False)
             match_status = m.get("status", "In-Play")
+            winning_team = m.get("winner")
 
             for idx, outcome in enumerate(odds):
                 name = outcome["name"]
@@ -483,6 +675,10 @@ class ExchangeScraperEngine:
 
                     target_team = outcome["name"]
                     target_odd = override if override else outcome.get("back")
+                    
+                    # Apply delta sanity check
+                    m_slug = m.get("match_slug") or m.get("id") or "live"
+                    target_odd = self.validate_odds_delta(f"{m_slug}:{target_team}", target_odd)
                     target_lay = outcome.get("lay")
 
                     # GUARD ACTIVE ODDS: If valid numeric odds exist, match is definitely LIVE!
@@ -504,8 +700,11 @@ class ExchangeScraperEngine:
                         "opponent_odd": opponent_odd,
                         "opponent_lay": opponent_lay,
                         "match_title": m.get("title"),
+                        "match_slug": m.get("match_slug") or m.get("id"),
+                        "match_id": m.get("match_id") or m.get("id"),
                         "is_finished": is_finished,
-                        "status": match_status
+                        "status": match_status,
+                        "winner": winning_team
                     }
 
             # Check if match is finished even if odds array is empty
@@ -525,8 +724,11 @@ class ExchangeScraperEngine:
                         "opponent_odd": None,
                         "opponent_lay": None,
                         "match_title": m.get("title"),
+                        "match_slug": m.get("match_slug") or m.get("id"),
+                        "match_id": m.get("match_id") or m.get("id"),
                         "is_finished": True,
-                        "status": match_status
+                        "status": match_status,
+                        "winner": winning_team
                     }
 
         if best_candidate:
