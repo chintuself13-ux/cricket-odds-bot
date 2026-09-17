@@ -118,12 +118,14 @@ class ExchangeScraperEngine:
     def __init__(self):
         self._lock = threading.Lock()
         self.last_fetch_time = 0
+        self.last_fetch_status = 200
         self.http_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Referer": "https://crex.live/",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
         }
         self.manual_overrides: Dict[str, float] = {}
         self._aiohttp_session: Optional[aiohttp.ClientSession] = None
@@ -183,9 +185,12 @@ class ExchangeScraperEngine:
     async def _fetch_url_text(self, url: str) -> Optional[str]:
         try:
             session = await self.get_aiohttp_session()
-            async with session.get(url) as resp:
+            async with session.get(url, headers=self.http_headers) as resp:
+                self.last_fetch_status = resp.status
                 if resp.status == 200:
                     return await resp.text()
+                else:
+                    logger.warning(f"aiohttp fetch for {url} returned HTTP status {resp.status}")
         except (RuntimeError, asyncio.CancelledError, aiohttp.ClientError) as e:
             logger.debug(f"aiohttp fetch notice for {url}: {e}")
         except Exception as e:
@@ -194,17 +199,13 @@ class ExchangeScraperEngine:
         # Robust fast httpx async scraping fallback with browser headers
         try:
             import httpx
-            headers = {
-                **self.http_headers,
-                "Accept-Language": "en-US,en;q=0.9",
-                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"'
-            }
-            async with httpx.AsyncClient(headers=headers, timeout=6.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(headers=self.http_headers, timeout=6.0, follow_redirects=True) as client:
                 resp = await client.get(url)
+                self.last_fetch_status = resp.status_code
                 if resp.status_code == 200:
                     return resp.text
+                else:
+                    logger.warning(f"httpx fetch for {url} returned HTTP status {resp.status_code}")
         except Exception as e:
             logger.debug(f"httpx fallback notice for {url}: {e}")
         return None
@@ -323,30 +324,49 @@ class ExchangeScraperEngine:
 
     async def fetch_live_matches_async(self) -> List[Dict[str, Any]]:
         """
-        Asynchronously fetches live match data using persistent aiohttp.ClientSession connection pool.
+        Asynchronously fetches live match data directly from CREX match-list & cricket-live-score endpoints,
+        extracting __NEXT_DATA__ JSON state and HTML fixture elements.
         """
-        url = urllib.parse.urljoin(BASE_URL, "/cricket-live-score")
-        try:
-            html_data = await self._fetch_url_text_with_retry(url, max_retries=3, base_delay=1.5)
-            if not html_data:
-                return []
+        endpoints = [
+            "/fixtures/match-list",
+            "/cricket-live-score"
+        ]
+        crex_slugs = []
+        for ep in endpoints:
+            url = urllib.parse.urljoin(BASE_URL, ep)
+            try:
+                html_data = await self._fetch_url_text_with_retry(url, max_retries=2, base_delay=1.0)
+                if html_data:
+                    # 1. Parse __NEXT_DATA__ JSON script if present
+                    next_m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html_data, re.DOTALL)
+                    if next_m:
+                        try:
+                            next_json = json.loads(next_m.group(1))
+                            props = next_json.get("props", {}).get("pageProps", {})
+                            m_list = props.get("matches") or props.get("liveMatches") or props.get("fixtureData") or props.get("matchList") or []
+                            if isinstance(m_list, list):
+                                for item in m_list:
+                                    if isinstance(item, dict):
+                                        s = item.get("slug") or item.get("matchSlug") or item.get("url") or item.get("link")
+                                        if s and isinstance(s, str) and s not in crex_slugs:
+                                            crex_slugs.append(s if s.startswith("/") else f"/cricket-live-score/{s}")
+                        except Exception as ex:
+                            logger.debug(f"Notice parsing __NEXT_DATA__ on {ep}: {ex}")
 
-            raw_links = re.findall(r'href="(/cricket-live-score/[a-zA-Z0-9\-]+)"', html_data)
-            crex_slugs = list(dict.fromkeys(raw_links))
+                    # 2. Extract HTML href links
+                    raw_links = re.findall(r'href="(/cricket-live-score/[a-zA-Z0-9\-]+)"', html_data)
+                    for link in raw_links:
+                        if link not in crex_slugs:
+                            crex_slugs.append(link)
+            except Exception as e:
+                logger.warning(f"Error fetching CREX endpoint {ep}: {e}")
 
-            matches = []
-            for slug in crex_slugs[:8]:
-                match_data = await self._scrape_crex_match_page_async(slug)
-                if match_data:
-                    matches.append(match_data)
-            return matches
-        except (RuntimeError, asyncio.CancelledError, aiohttp.ClientError) as e:
-            logger.warning(f"Async Crex list fetch loop error: {e}. Sleeping 3s...")
-            await asyncio.sleep(3)
-            return []
-        except Exception as e:
-            logger.warning(f"Async Crex list fetch warning: {e}")
-            return []
+        matches = []
+        for slug in crex_slugs[:10]:
+            match_data = await self._scrape_crex_match_page_async(slug)
+            if match_data:
+                matches.append(match_data)
+        return matches
 
     def fetch_live_matches(self) -> List[Dict[str, Any]]:
         """Synchronous wrapper for fetch_live_matches_async."""
