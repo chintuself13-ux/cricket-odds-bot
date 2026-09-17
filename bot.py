@@ -22,7 +22,7 @@ except ImportError:
     HAS_PYMONGO = False
 
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
-from exchange_scraper import global_exchange_scraper, format_indian_odds, is_team_match, set_base_url, BASE_URL
+from exchange_scraper import global_exchange_scraper, format_indian_odds, is_team_match, set_base_url, set_exchange_url, BASE_URL, BASE_EXCHANGE_URL
 
 ADMIN_ID = 7592394328
 
@@ -750,8 +750,8 @@ class TelegramOddsBot:
             logger.info(f"Command from chat {chat_id} (user {user_id}): {text}")
 
             # 1. Admin Commands
-            if cmd == "/seturl":
-                asyncio.create_task(self._cmd_seturl_async(chat_id, user_id, parts[1:], from_user))
+            if cmd in ["/setdomain", "/seturl"]:
+                asyncio.create_task(self._cmd_setdomain_async(chat_id, user_id, parts[1:], from_user))
                 return
 
             if cmd in ["/allow", "/revoke", "/users", "/reject", "/msg"]:
@@ -1088,14 +1088,14 @@ class TelegramOddsBot:
         reply_msg = "✅ Feedback sent to admin. Thank you!"
         await asyncio.to_thread(self.client.send_message, chat_id, reply_msg, "HTML", False)
 
-    async def _cmd_seturl_async(self, chat_id: str | int, user_id: int, args: list, from_user: Dict[str, Any]):
+    async def _cmd_setdomain_async(self, chat_id: str | int, user_id: int, args: list, from_user: Dict[str, Any]):
         sender_id = from_user.get("id") if from_user else user_id
         try:
             sender_id = int(sender_id)
         except (ValueError, TypeError):
             pass
 
-        if sender_id != ADMIN_ID:
+        if sender_id != ADMIN_ID and sender_id != DEFAULT_ADMIN_ID:
             await asyncio.to_thread(self.client.send_message, chat_id, "Unauthorized", "HTML", False)
             return
 
@@ -1103,8 +1103,8 @@ class TelegramOddsBot:
             await asyncio.to_thread(
                 self.client.send_message,
                 chat_id,
-                "⚠️ <b>Usage Syntax:</b> <code>/seturl &lt;new_url&gt;</code>\n"
-                "<i>Example:</i> <code>/seturl https://crex.live</code>",
+                "⚠️ <b>Usage Syntax:</b> <code>/setdomain &lt;new_url&gt;</code>\n"
+                "<i>Example:</i> <code>/setdomain https://reddybook.club</code>",
                 "HTML", False
             )
             return
@@ -1116,27 +1116,14 @@ class TelegramOddsBot:
             await asyncio.to_thread(
                 self.client.send_message,
                 chat_id,
-                "❌ Invalid URL structure. Please provide a valid domain (e.g., <code>https://crex.live</code>).",
+                "❌ Invalid URL structure. Please provide a valid domain (e.g., <code>https://reddybook.club</code>).",
                 "HTML", False
             )
             return
 
-        updated_url = set_base_url(target_url)
+        updated_url = set_exchange_url(target_url)
 
-        status_str = "OK"
-        try:
-            session = await global_exchange_scraper.get_aiohttp_session()
-            async with session.get(updated_url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
-                status_str = f"200 OK" if resp.status == 200 else f"{resp.status}"
-        except Exception:
-            try:
-                req = urllib.request.Request(updated_url, headers=global_exchange_scraper.http_headers)
-                with urllib.request.urlopen(req, timeout=5.0) as resp:
-                    status_str = f"{resp.getcode()} OK"
-            except Exception:
-                status_str = "OK"
-
-        reply_msg = f"✅ Base domain updated to: {updated_url}\nStatus: {status_str}"
+        reply_msg = f"🌐 <b>Exchange Base Domain Updated!</b>\nNew Base URL: <code>{updated_url}</code>\nUpdates active dynamically without code redeployment."
         await asyncio.to_thread(self.client.send_message, chat_id, reply_msg, "HTML", False)
 
     def _cmd_start(self, chat_id: str | int, user_id: Optional[str | int] = None):
@@ -1148,6 +1135,7 @@ class TelegramOddsBot:
             "• <code>/reject &lt;user_id&gt;</code> — Reject user payment\n"
             "• <code>/msg &lt;user_id&gt; &lt;text&gt;</code> — Direct message user\n"
             "• <code>/users</code> — View all active users &amp; remaining days\n"
+            "• <code>/setdomain &lt;new_url&gt;</code> — Update Exchange Base URL dynamically\n"
             "• <code>/setodd &lt;team&gt; &lt;odd&gt;</code> — Modify live odd for instant testing"
         ) if is_admin else ""
 

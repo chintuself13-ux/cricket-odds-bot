@@ -12,13 +12,22 @@ from typing import Dict, List, Any, Optional, Tuple
 
 logger = logging.getLogger("ExchangeScraper")
 
-BASE_URL = "https://api.the-odds-api.com"
+BASE_EXCHANGE_URL = os.getenv("EXCHANGE_URL", "https://reddybook.info").rstrip("/")
+BASE_URL = BASE_EXCHANGE_URL
+
+def set_exchange_url(new_url: str) -> str:
+    global BASE_EXCHANGE_URL, BASE_URL
+    if new_url:
+        url_str = new_url.strip()
+        if not (url_str.startswith("http://") or url_str.startswith("https://")):
+            url_str = "https://" + url_str
+        BASE_EXCHANGE_URL = url_str.rstrip("/")
+        BASE_URL = BASE_EXCHANGE_URL
+        logger.info(f"Exchange BASE_EXCHANGE_URL updated dynamically to: {BASE_EXCHANGE_URL}")
+    return BASE_EXCHANGE_URL
 
 def set_base_url(new_url: str) -> str:
-    global BASE_URL
-    if new_url:
-        BASE_URL = new_url.strip().rstrip("/")
-    return BASE_URL
+    return set_exchange_url(new_url)
 
 TEAM_ABBREVIATIONS = {
     "AUS": "Australia",
@@ -74,8 +83,8 @@ def format_indian_odds(back_odd: Optional[float], lay_odd: Optional[float] = Non
 
 class ExchangeScraperEngine:
     """
-    The Odds API Engine: Fetches real-time cricket odds directly via The Odds API.
-    Replaces CREX web scraping with clean, reliable API data.
+    Direct Reddybook / Diamond Exchange API Engine.
+    Queries public in-play match endpoints with dynamic base URL support.
     """
     def __init__(self):
         self._lock = threading.Lock()
@@ -83,7 +92,7 @@ class ExchangeScraperEngine:
         self.last_fetch_status = 200
         self.http_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json"
+            "Accept": "application/json, text/plain, */*"
         }
         self.manual_overrides: Dict[str, float] = {}
         self._aiohttp_session: Optional[aiohttp.ClientSession] = None
@@ -157,6 +166,89 @@ class ExchangeScraperEngine:
                 pass
             self._aiohttp_session = None
 
+    def _parse_exchange_match(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(item, dict):
+            return None
+
+        match_id = str(item.get("id") or item.get("matchId") or item.get("eventId") or item.get("marketId") or "")
+        home_team = self._clean_team_name(item.get("home_team") or item.get("homeTeam") or item.get("team1") or "")
+        away_team = self._clean_team_name(item.get("away_team") or item.get("awayTeam") or item.get("team2") or "")
+
+        title = item.get("title") or item.get("eventName") or item.get("matchName") or ""
+        if (not home_team or not away_team) and title:
+            parts = re.split(r'\s+(?:vs|v)\s+', title, flags=re.IGNORECASE)
+            if len(parts) >= 2:
+                home_team = self._clean_team_name(parts[0])
+                away_team = self._clean_team_name(parts[1])
+
+        if not home_team or not away_team or home_team.lower() == away_team.lower():
+            return None
+
+        runners = item.get("runners") or item.get("runnersBook") or item.get("outcomes") or []
+        odds_arr = []
+
+        for idx, runner in enumerate(runners):
+            if isinstance(runner, dict):
+                r_name = self._clean_team_name(runner.get("runnerName") or runner.get("name") or runner.get("team") or (home_team if idx == 0 else away_team))
+                
+                back_price = None
+                back_data = runner.get("back") or runner.get("b1") or runner.get("price")
+                if isinstance(back_data, list) and back_data:
+                    first_b = back_data[0]
+                    if isinstance(first_b, dict):
+                        back_price = first_b.get("price") or first_b.get("rate")
+                    elif isinstance(first_b, (int, float)):
+                        back_price = float(first_b)
+                elif isinstance(back_data, (int, float)):
+                    back_price = float(back_data)
+
+                lay_price = None
+                lay_data = runner.get("lay") or runner.get("l1")
+                if isinstance(lay_data, list) and lay_data:
+                    first_l = lay_data[0]
+                    if isinstance(first_l, dict):
+                        lay_price = first_l.get("price") or first_l.get("rate")
+                    elif isinstance(first_l, (int, float)):
+                        lay_price = float(first_l)
+                elif isinstance(lay_data, (int, float)):
+                    lay_price = float(lay_data)
+
+                override = self._get_override(r_name)
+                if override:
+                    back_price = override
+
+                if back_price is not None and isinstance(back_price, (int, float)) and back_price > 0:
+                    if back_price < 1.0:
+                        dec_price = round(1.0 + back_price, 2)
+                    elif back_price >= 1.0 and back_price < 100.0 and "." not in str(back_price):
+                        dec_price = round(1.0 + (back_price / 100.0), 2)
+                    else:
+                        dec_price = round(back_price, 2)
+
+                    odds_arr.append({
+                        "name": r_name,
+                        "back": dec_price,
+                        "lay": lay_price,
+                        "price": dec_price,
+                        "indian_odds": format_indian_odds(dec_price)
+                    })
+
+        print(f"[EXCHANGE DEBUG] Match: {home_team} vs {away_team} | Raw Odds: {odds_arr}", flush=True)
+
+        return {
+            "id": match_id or f"{home_team}-vs-{away_team}",
+            "match_id": match_id or f"{home_team}-vs-{away_team}",
+            "match_slug": match_id or f"{home_team}-vs-{away_team}",
+            "title": f"{home_team} vs {away_team}",
+            "sport": "Reddybook / Diamond Exchange",
+            "status": "In-Play",
+            "is_finished": False,
+            "winner": None,
+            "home_team": home_team,
+            "away_team": away_team,
+            "odds": odds_arr
+        }
+
     def _parse_odds_api_match(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(item, dict):
             return None
@@ -215,14 +307,12 @@ class ExchangeScraperEngine:
                 "indian_odds": format_indian_odds(away_back)
             })
 
-        print(f"[ODDS API DEBUG] Match: {home_team} vs {away_team} | Raw Odds: {odds_arr}", flush=True)
-
         return {
             "id": match_id,
             "match_id": match_id,
             "match_slug": match_id,
             "title": f"{home_team} vs {away_team}",
-            "sport": "Cricket (The Odds API)",
+            "sport": "Cricket Market",
             "status": "In-Play",
             "is_finished": False,
             "winner": None,
@@ -233,51 +323,63 @@ class ExchangeScraperEngine:
 
     async def fetch_live_matches_async(self) -> List[Dict[str, Any]]:
         """
-        Fetches live cricket matches exclusively via The Odds API.
-        URL: https://api.the-odds-api.com/v4/sports/cricket/odds/?apiKey={ODDS_API_KEY}&regions=eu,uk&markets=h2h&oddsFormat=decimal
+        Fetches in-play cricket matches from Reddybook / Diamond Exchange API endpoints,
+        with fallback to live market data if exchange endpoint returns empty.
         """
-        api_key = os.getenv("ODDS_API_KEY", "25047480db3ccb593f5c89c19de5a840").strip()
-        if not api_key:
-            logger.warning("ODDS_API_KEY not set in environment.")
-            return []
+        endpoints = [
+            f"{BASE_EXCHANGE_URL}/api/v1/inplay-matches",
+            f"{BASE_EXCHANGE_URL}/api/v1/inplay",
+            f"{BASE_EXCHANGE_URL}/api/v1/listMarketBook",
+            f"{BASE_EXCHANGE_URL}/api/v1/cricket-matches"
+        ]
 
-        url = f"https://api.the-odds-api.com/v4/sports/cricket/odds/?apiKey={api_key}&regions=eu,uk&markets=h2h&oddsFormat=decimal"
-        raw_data = []
+        raw_matches = []
+        session = await self.get_aiohttp_session()
 
-        try:
-            session = await self.get_aiohttp_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
-                self.last_fetch_status = resp.status
-                if resp.status == 200:
-                    raw_data = await resp.json()
-                else:
-                    logger.warning(f"The Odds API returned status {resp.status}")
-        except Exception as e:
-            logger.warning(f"Error fetching The Odds API: {e}")
-            raw_data = []
+        for ep in endpoints:
+            try:
+                async with session.get(ep, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
+                    self.last_fetch_status = resp.status
+                    if resp.status == 200:
+                        content_type = resp.headers.get("Content-Type", "")
+                        if "json" in content_type:
+                            data = await resp.json()
+                            if isinstance(data, list) and data:
+                                raw_matches = data
+                                break
+                            elif isinstance(data, dict):
+                                m_list = data.get("matches") or data.get("data") or data.get("result") or []
+                                if isinstance(m_list, list) and m_list:
+                                    raw_matches = m_list
+                                    break
+            except Exception as e:
+                logger.debug(f"Notice fetching exchange endpoint {ep}: {e}")
 
-        if not raw_data:
-            for s in ["cricket_odi", "cricket_test_match"]:
+        parsed_matches = []
+        if raw_matches:
+            for item in raw_matches:
+                m = self._parse_exchange_match(item)
+                if m:
+                    parsed_matches.append(m)
+
+        # Fallback to live market API if exchange endpoint returns empty
+        if not parsed_matches:
+            api_key = os.getenv("ODDS_API_KEY", "25047480db3ccb593f5c89c19de5a840").strip()
+            if api_key:
+                url = f"https://api.the-odds-api.com/v4/sports/cricket/odds/?apiKey={api_key}&regions=eu,uk&markets=h2h&oddsFormat=decimal"
                 try:
-                    fallback_url = f"https://api.the-odds-api.com/v4/sports/{s}/odds/?apiKey={api_key}&regions=eu,uk&markets=h2h&oddsFormat=decimal"
-                    session = await self.get_aiohttp_session()
-                    async with session.get(fallback_url, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            if data:
-                                raw_data = data
-                                break
-                except Exception:
-                    pass
+                            if isinstance(data, list):
+                                for item in data:
+                                    m_odds = self._parse_odds_api_match(item)
+                                    if m_odds:
+                                        parsed_matches.append(m_odds)
+                except Exception as e:
+                    logger.debug(f"Notice fetching fallback Odds API: {e}")
 
-        matches = []
-        if isinstance(raw_data, list):
-            for item in raw_data:
-                m_parsed = self._parse_odds_api_match(item)
-                if m_parsed:
-                    matches.append(m_parsed)
-
-        return matches
+        return parsed_matches
 
     def fetch_live_matches(self) -> List[Dict[str, Any]]:
         import asyncio
