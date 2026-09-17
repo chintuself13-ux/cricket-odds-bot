@@ -669,10 +669,6 @@ class ExchangeScraperEngine:
                     t1_back = t1_override or round(1.0 / p1_back, 2)
                     t1_lay = round(t1_back + (0.01 if t1_back < 2.0 else 0.50), 2)
                 
-                t1_back = t1_back or 1.85
-                t1_lay = t1_lay or round(t1_back + 0.02, 2)
-                t2_back = t2_back or 1.85
-                t2_lay = t2_lay or round(t2_back + 0.02, 2)
             elif r_match:
                 p_back = float(r_match.group(1))
                 offset = float(r_match.group(2))
@@ -702,28 +698,31 @@ class ExchangeScraperEngine:
             else:
                 return None
 
-            odds_arr = [
-                {
+            odds_arr = []
+            if t1_back is not None and t1_back > 1.0:
+                odds_arr.append({
                     "name": team1,
                     "back": t1_back,
                     "lay": t1_lay,
                     "price": t1_back,
                     "win_prob": round((1.0 / max(0.01, t1_back)) * 100, 1),
                     "indian_odds": format_indian_odds(t1_back, t1_lay)
-                },
-                {
+                })
+            if t2_back is not None and t2_back > 1.0:
+                odds_arr.append({
                     "name": team2,
                     "back": t2_back,
                     "lay": t2_lay,
                     "price": t2_back,
                     "win_prob": round((1.0 / max(0.01, t2_back)) * 100, 1),
                     "indian_odds": format_indian_odds(t2_back, t2_lay)
-                }
-            ]
+                })
 
-            sorted_odds = sorted(odds_arr, key=lambda x: x["back"])
-            fav = sorted_odds[0]
-            underdog = sorted_odds[1]
+            print(f"[LIVE CREX DEBUG] Match: {team1} vs {team2} | Raw Odds: {odds_arr}", flush=True)
+
+            sorted_odds = sorted(odds_arr, key=lambda x: x["back"]) if odds_arr else []
+            fav = sorted_odds[0] if len(sorted_odds) > 0 else {"name": team1, "back": 1.01}
+            underdog = sorted_odds[1] if len(sorted_odds) > 1 else (sorted_odds[0] if len(sorted_odds) > 0 else {"name": team2, "back": 2.00})
 
             fav_target_odd = round(max(1.02, fav["back"] - 0.07), 2)
             underdog_target_odd = round(max(1.10, underdog["back"] * 0.53), 2)

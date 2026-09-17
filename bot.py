@@ -1264,7 +1264,7 @@ class TelegramOddsBot:
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
 
     async def _handle_match_click_async(self, chat_id: str | int, user_id: int, match_idx: int, cb_id: str):
-        """Step 2: Instant 0-delay team selection buttons using memory state."""
+        """Step 2: Team selection buttons with fresh real-time CREX match re-scrape."""
         if cb_id:
             asyncio.create_task(asyncio.to_thread(self.client.answer_callback_query, cb_id))
 
@@ -1277,6 +1277,16 @@ class TelegramOddsBot:
             return
 
         selected_match = matches[match_idx]
+        match_slug = selected_match.get("slug") or selected_match.get("id") or selected_match.get("match_slug")
+
+        # Force fresh live CREX re-scrape on match selection
+        if match_slug:
+            fresh_match = await global_exchange_scraper.scrape_single_match_by_slug_async(match_slug)
+            if fresh_match:
+                selected_match = fresh_match
+                matches[match_idx] = fresh_match
+                USER_STATES[user_id]["matches"] = matches
+
         home_team = selected_match.get("home_team", "Team 1")
         away_team = selected_match.get("away_team", "Team 2")
         odds_list = selected_match.get("odds", [])
@@ -1284,13 +1294,13 @@ class TelegramOddsBot:
         home_odd = next((o for o in odds_list if is_team_match(o.get("name"), home_team)), odds_list[0] if len(odds_list) > 0 else None)
         away_odd = next((o for o in odds_list if is_team_match(o.get("name"), away_team)), odds_list[1] if len(odds_list) > 1 else None)
 
-        home_back = home_odd.get("back", 1.85) if home_odd else 1.85
+        home_back = home_odd.get("back") if home_odd else None
         home_lay = home_odd.get("lay") if home_odd else None
-        away_back = away_odd.get("back", 1.85) if away_odd else 1.85
+        away_back = away_odd.get("back") if away_odd else None
         away_lay = away_odd.get("lay") if away_odd else None
 
-        home_bhav_str = home_odd.get("indian_odds") if (home_odd and home_odd.get("indian_odds")) else format_indian_odds(home_back, home_lay)
-        away_bhav_str = away_odd.get("indian_odds") if (away_odd and away_odd.get("indian_odds")) else format_indian_odds(away_back, away_lay)
+        home_bhav_str = (home_odd.get("indian_odds") if (home_odd and home_odd.get("indian_odds")) else format_indian_odds(home_back, home_lay)) or "Rate Suspended"
+        away_bhav_str = (away_odd.get("indian_odds") if (away_odd and away_odd.get("indian_odds")) else format_indian_odds(away_back, away_lay)) or "Rate Suspended"
 
         USER_STATES[user_id]["selected_match"] = selected_match
 
@@ -1312,7 +1322,7 @@ class TelegramOddsBot:
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
 
     async def _handle_team_click_async(self, chat_id: str | int, user_id: int, match_idx: int, team_idx: int, cb_id: str):
-        """Step 3 Start: Instant 0-delay target odd prompt upon team selection."""
+        """Step 3 Start: Target odd prompt with fresh real-time CREX rate lock."""
         if cb_id:
             asyncio.create_task(asyncio.to_thread(self.client.answer_callback_query, cb_id))
         user_state = USER_STATES.get(user_id, {})
@@ -1326,22 +1336,23 @@ class TelegramOddsBot:
         selected_match = matches[match_idx]
         home_team = selected_match.get("home_team", "Team 1")
         away_team = selected_match.get("away_team", "Team 2")
-        odds_list = selected_match.get("odds", [])
+        match_slug = selected_match.get("slug") or selected_match.get("id") or selected_match.get("match_slug")
 
-        home_odd = next((o for o in odds_list if is_team_match(o.get("name"), home_team)), odds_list[0] if len(odds_list) > 0 else None)
-        away_odd = next((o for o in odds_list if is_team_match(o.get("name"), away_team)), odds_list[1] if len(odds_list) > 1 else None)
+        chosen_team = home_team if team_idx == 0 else away_team
+        opp_team = away_team if team_idx == 0 else home_team
 
-        if team_idx == 0:
-            chosen_team = home_team
-            chosen_odd_obj = home_odd
-            opp_team = away_team
-        else:
-            chosen_team = away_team
-            chosen_odd_obj = away_odd
-            opp_team = home_team
+        # Fetch fresh odds for selected team
+        entry_back = None
+        if match_slug:
+            live_data = await global_exchange_scraper.get_live_odds_data_for_match_slug_async(match_slug, chosen_team)
+            entry_back = live_data.get("target_odd")
 
-        entry_back = chosen_odd_obj.get("back", 1.85) if chosen_odd_obj else 1.85
-        live_bhav_str = format_indian_odds(entry_back)
+        if entry_back is None:
+            odds_list = selected_match.get("odds", [])
+            chosen_odd_obj = next((o for o in odds_list if is_team_match(o.get("name"), chosen_team)), None)
+            entry_back = chosen_odd_obj.get("back") if chosen_odd_obj else None
+
+        live_bhav_str = format_indian_odds(entry_back) if entry_back else "Rate Suspended"
 
         USER_STATES[user_id] = {
             "state": "AWAITING_TARGET",
