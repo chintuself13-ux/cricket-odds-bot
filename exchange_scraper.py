@@ -500,18 +500,29 @@ class ExchangeScraperEngine:
                 if MARKET_CACHE:
                     raw_data = list(MARKET_CACHE.values())
 
-        # 4. Filter and Parse Matches
+        # 4. Filter and Parse Live Cricket Matches (Schema: event_type_id == 4, in_play == 1, name has 'v' or 'vs')
         matches = []
         if isinstance(raw_data, list):
-            for item in raw_data:
-                if isinstance(item, dict):
-                    # Filter for cricket (sports_id == 4 or '4' or sport/sport_name containing 'cricket' if field is present)
-                    s_id = str(item.get("sports_id") or item.get("sportsId") or item.get("sport_id") or item.get("sportId") or "")
-                    s_name = str(item.get("sport") or item.get("sport_name") or item.get("sportName") or "").lower()
-                    if s_id and s_id not in ["4", "0", ""] and "cricket" not in s_name:
+            for ev in raw_data:
+                if isinstance(ev, dict):
+                    event_type = str(ev.get("event_type_id") or ev.get("sports_id") or ev.get("sport_id") or "")
+                    in_play = str(ev.get("in_play") if ev.get("in_play") is not None else "")
+                    name = str(ev.get("name") or ev.get("event_name") or ev.get("title") or "")
+                    name_lower = name.lower()
+
+                    # Cricket matches have event_type_id == 4 (or sports_id == 4 or name containing vs/v)
+                    if event_type and event_type not in ["4", "0"]:
                         continue
 
-                    m_parsed = self._parse_exchange_match(item)
+                    # Prefer live in-play matches (in_play == 1 or true) if in_play field is provided
+                    if in_play and in_play not in ["1", "true", "True"]:
+                        continue
+
+                    # Filter out generic league names, keep actual fixtures containing ' v ' or ' vs ' or ' - '
+                    if name and not (" v " in name_lower or " vs " in name_lower or " - " in name_lower):
+                        continue
+
+                    m_parsed = self._parse_exchange_match(ev)
                     if m_parsed:
                         # Enrich with real-time odds from MARKET_CACHE if available
                         m_id = m_parsed.get("id") or m_parsed.get("match_id")
