@@ -321,7 +321,7 @@ class MultiTrackOddsEngine:
             if job.entry_odd is None and live_odd is not None:
                 job.entry_odd = live_odd
 
-            print(f"[DEBUG POLL] Team: {job.team_name} | Live Odd: {live_odd} | Target: {job.operator} {job.threshold:.2f} | Source: {source_name}", flush=True)
+            print(f"[LIVE TICK] Tracked: {job.team_name} | Current: {live_odd} | Target: {job.threshold}", flush=True)
 
             if live_odd is not None:
                 job.last_odd = live_odd

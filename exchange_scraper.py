@@ -82,24 +82,38 @@ def convert_paresh_to_decimal(val: float) -> float:
     else:
         return round(1.0 + (val / 100.0), 2)
 
+def is_team_match(feed_name: Optional[str], target_name: Optional[str]) -> bool:
+    """
+    Fuzzy/Substring Team Name Matching:
+    Checks if parts of the team names exist in each other, eliminating exact string equality failures.
+    """
+    if not feed_name or not target_name:
+        return False
+    feed = str(feed_name).lower().replace("-", " ").replace("_", " ").strip()
+    target = str(target_name).lower().replace("-", " ").replace("_", " ").strip()
+    if feed == target or feed in target or target in feed:
+        return True
+    feed_words = [w for w in feed.split() if len(w) > 2]
+    target_words = [w for w in target.split() if len(w) > 2]
+    return any(word in target for word in feed_words) or any(word in feed for word in target_words)
+
 def format_indian_odds(back_odd: Optional[float], lay_odd: Optional[float] = None) -> str:
     """
-    Converts standard decimal odds to Indian Bookie / Exchange format (Paresh / Lagan / Paise).
-    - If back_odd <= 2.00 (1-100 paise range):
-      1.12 Back / 1.14 Lay -> "12-14 paise"
-      1.53 Back / 1.54 Lay -> "53-54 paise"
-      1.90 Back / 1.92 Lay -> "90-92 paise"
-      1.02 Back / 1.03 Lay -> "2-3 paise"
-    - If back_odd > 2.00 (Underdog decimal rate):
-      Quoted in standard decimal rate (e.g., "8.50 / 9.00 rate"),
-      NEVER multiplied into invalid 750-800+ paise numbers.
+    Strict Ground Rule for Favourite vs Underdog:
+    - If decimal odd < 2.0 (Favourite team):
+      Format strictly as Paise: int(round((decimal - 1) * 100)) paise.
+      (e.g., Decimal 1.08 = 8 paise, 1.16 = 16 paise, 1.01 = 1-2 paise).
+    - If decimal odd >= 2.0 (Underdog team):
+      Format strictly as Rate: f"{decimal:.2f} rate"
+      (e.g., Decimal 7.29 = 7.29 rate).
+    - NEVER let the underdog show paise while the favorite shows rate.
     """
     if back_odd is None or not isinstance(back_odd, (int, float)) or back_odd <= 1.0:
         return ""
 
-    if back_odd <= 2.00:
+    if back_odd < 2.00:
         back_paise = int(round((back_odd - 1.0) * 100))
-        if lay_odd is not None and isinstance(lay_odd, (int, float)) and lay_odd > 1.0 and lay_odd <= 2.00:
+        if lay_odd is not None and isinstance(lay_odd, (int, float)) and lay_odd > 1.0 and lay_odd < 2.00:
             lay_paise = int(round((lay_odd - 1.0) * 100))
             return f"{back_paise}-{lay_paise} paise"
         else:
@@ -1096,6 +1110,9 @@ class ExchangeScraperEngine:
         if not query or not target:
             return False
 
+        if is_team_match(query, target):
+            return True
+
         q_raw = query.strip()
         t_raw = target.strip()
 
@@ -1106,7 +1123,7 @@ class ExchangeScraperEngine:
         q_clean = ExchangeScraperEngine._clean_team_name(query).lower()
         t_clean = ExchangeScraperEngine._clean_team_name(target).lower()
 
-        if q_clean == t_clean:
+        if q_clean == t_clean or is_team_match(q_clean, t_clean):
             return True
 
         # 2. Country Cross-Leak Prevention Guard

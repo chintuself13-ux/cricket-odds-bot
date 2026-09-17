@@ -22,7 +22,7 @@ except ImportError:
     HAS_PYMONGO = False
 
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
-from exchange_scraper import global_exchange_scraper, format_indian_odds, set_base_url, BASE_URL
+from exchange_scraper import global_exchange_scraper, format_indian_odds, is_team_match, set_base_url, BASE_URL
 
 ADMIN_ID = 7592394328
 
@@ -1265,6 +1265,9 @@ class TelegramOddsBot:
 
     async def _handle_match_click_async(self, chat_id: str | int, user_id: int, match_idx: int, cb_id: str):
         """Step 2: Instant 0-delay team selection buttons using memory state."""
+        if cb_id:
+            asyncio.create_task(asyncio.to_thread(self.client.answer_callback_query, cb_id))
+
         user_state = USER_STATES.get(user_id, {})
         matches = user_state.get("matches", [])
 
@@ -1278,8 +1281,8 @@ class TelegramOddsBot:
         away_team = selected_match.get("away_team", "Team 2")
         odds_list = selected_match.get("odds", [])
 
-        home_odd = next((o for o in odds_list if o.get("name") == home_team), odds_list[0] if len(odds_list) > 0 else None)
-        away_odd = next((o for o in odds_list if o.get("name") == away_team), odds_list[1] if len(odds_list) > 1 else None)
+        home_odd = next((o for o in odds_list if is_team_match(o.get("name"), home_team)), odds_list[0] if len(odds_list) > 0 else None)
+        away_odd = next((o for o in odds_list if is_team_match(o.get("name"), away_team)), odds_list[1] if len(odds_list) > 1 else None)
 
         home_back = home_odd.get("back", 1.85) if home_odd else 1.85
         home_lay = home_odd.get("lay") if home_odd else None
@@ -1310,6 +1313,8 @@ class TelegramOddsBot:
 
     async def _handle_team_click_async(self, chat_id: str | int, user_id: int, match_idx: int, team_idx: int, cb_id: str):
         """Step 3 Start: Instant 0-delay target odd prompt upon team selection."""
+        if cb_id:
+            asyncio.create_task(asyncio.to_thread(self.client.answer_callback_query, cb_id))
         user_state = USER_STATES.get(user_id, {})
         matches = user_state.get("matches", [])
 
@@ -1323,8 +1328,8 @@ class TelegramOddsBot:
         away_team = selected_match.get("away_team", "Team 2")
         odds_list = selected_match.get("odds", [])
 
-        home_odd = next((o for o in odds_list if o.get("name") == home_team), odds_list[0] if len(odds_list) > 0 else None)
-        away_odd = next((o for o in odds_list if o.get("name") == away_team), odds_list[1] if len(odds_list) > 1 else None)
+        home_odd = next((o for o in odds_list if is_team_match(o.get("name"), home_team)), odds_list[0] if len(odds_list) > 0 else None)
+        away_odd = next((o for o in odds_list if is_team_match(o.get("name"), away_team)), odds_list[1] if len(odds_list) > 1 else None)
 
         if team_idx == 0:
             chosen_team = home_team
@@ -1710,6 +1715,8 @@ class TelegramOddsBot:
                 curr = track.get("current_odd")
                 target_val = track.get("target", track.get("target_odd", 0.0))
                 target_display = (track.get("target_team_clean") or team_name).upper()
+
+                print(f"[LIVE TICK] Tracked: {target_display} | Current: {curr} | Target: {target_val}", flush=True)
 
                 if curr is not None and isinstance(curr, (int, float)) and curr > 1.01 and curr <= target_val:
                     track["status"] = "TRIGGERED"
