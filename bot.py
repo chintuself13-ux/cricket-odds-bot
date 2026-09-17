@@ -241,6 +241,49 @@ def parse_stake_input(val_str: str) -> Optional[float]:
         return None
 
 
+def clean_short_team_name(name: str) -> str:
+    """
+    Strips long tournament suffixes and noise words (European T20, Caribbean Premier League, etc.)
+    and truncates to clean short team name (Max 10-12 chars).
+    """
+    if not name:
+        return ""
+    s = name.strip()
+    suffixes = [
+        r'\bEuropean T20\b', r'\bCaribbean Premier League\b', r'\bPremier League\b', r'\bSuper League\b',
+        r'\bQualifier\b', r'\bSeries\b', r'\bT20I\b', r'\bT20\b', r'\bT10\b', r'\bODI\b', r'\bTest\b',
+        r'\bMatch\b', r'\bWomen\b', r'\bWomens\b', r'\bLeague\b', r'\bChallenge\b', r'\bTrophy\b',
+        r'\bCup\b', r'\bShield\b', r'\bBlast\b'
+    ]
+    # Strip 'Of' constructions like 'Sri Lanka Of England' -> 'Sri Lanka'
+    s = re.sub(r'\s+of\s+.*$', '', s, flags=re.IGNORECASE).strip()
+    for pat in suffixes:
+        s = re.sub(pat, '', s, flags=re.IGNORECASE).strip()
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    words = s.split()
+    if len(words) > 1:
+        s = " ".join(words[:2])
+    if len(s) > 11 and len(words) > 0:
+        s = words[0]
+    if len(s) > 11:
+        s = s[:11].strip()
+    return s if s else name[:11].strip()
+
+
+def format_short_match_button_label(home_team: str, away_team: str) -> str:
+    """
+    Formats match button text for 2-column grid layout (Max 20-24 characters).
+    Format: '🏏 TeamA vs TeamB'
+    """
+    t1 = clean_short_team_name(home_team)
+    t2 = clean_short_team_name(away_team)
+    label = f"🏏 {t1} vs {t2}"
+    if len(label) > 24:
+        label = label[:23] + "…"
+    return label
+
+
 # Force UTF-8 encoding for Windows console output
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -1162,18 +1205,56 @@ class TelegramOddsBot:
             "matches": matches
         }
 
-        # Step 1: Render clean Inline Keyboard of matches
+    async def _cmd_matches_async(self, chat_id: str | int, user_id: Optional[int] = None):
+        try:
+            raw_matches = await global_exchange_scraper.fetch_live_matches_async()
+            last_status = getattr(global_exchange_scraper, "last_fetch_status", 200)
+        except Exception as e:
+            logger.error(f"❌ Explicit CREX Live Fetch Error in /matches: {e}")
+            raw_matches = []
+            last_status = 500
+
+        matches = []
+        for m in raw_matches:
+            home = m.get("home_team", "").strip()
+            away = m.get("away_team", "").strip()
+            if not home or not away or home.lower() == away.lower():
+                continue
+            odds = m.get("odds", [])
+            if odds and any(o.get("back", 0) > 1.0 for o in odds):
+                matches.append(m)
+
+        if not matches:
+            logger.warning(f"❌ CREX Live Query Notice: /matches retrieved 0 live in-play matches (Status: {last_status}, Raw count: {len(raw_matches)}).")
+            if last_status in [403, 429, 503]:
+                msg = (
+                    "⚠️ <b>Live CREX matches auto-fetch blocked by firewall.</b>\n\n"
+                    "Please copy the match link directly from CREX and use <code>/seturl &lt;match_link&gt;</code> to track live ball-to-ball rates."
+                )
+            else:
+                msg = "🏏 No live in-play matches on CREX right now."
+            await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
+            return
+
+        uid = user_id if user_id is not None else (int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id)
+        USER_STATES[uid] = {
+            "state": "MATCH_SELECT",
+            "matches": matches
+        }
+
+        # Step 1: Render compact 2-column grid layout with short team labels (Max 20-24 chars)
         inline_keyboard = []
-        lines = ["🏏 <b>LIVE IN-PLAY CRICKET MATCHES</b>\n"]
+        row = []
         for idx, m in enumerate(matches):
             home_team = m.get("home_team", "Team 1")
             away_team = m.get("away_team", "Team 2")
-            match_status = m.get("status", "Live")
-
-            btn_text = f"🏏 {home_team} vs {away_team} - Live"
-            inline_keyboard.append([
-                {"text": btn_text, "callback_data": f"match:{idx}"}
-            ])
+            btn_text = format_short_match_button_label(home_team, away_team)
+            row.append({"text": btn_text, "callback_data": f"match:{idx}"})
+            if len(row) == 2:
+                inline_keyboard.append(row)
+                row = []
+        if row:
+            inline_keyboard.append(row)
 
         reply_markup = {"inline_keyboard": inline_keyboard}
         msg_text = (
@@ -1183,19 +1264,13 @@ class TelegramOddsBot:
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
 
     async def _handle_match_click_async(self, chat_id: str | int, user_id: int, match_idx: int, cb_id: str):
-        """Step 2: Present inline buttons for both competing teams along with live ground bhav."""
+        """Step 2: Instant 0-delay team selection buttons using memory state."""
         user_state = USER_STATES.get(user_id, {})
         matches = user_state.get("matches", [])
 
         if not matches or match_idx < 0 or match_idx >= len(matches):
-            raw_matches = await global_exchange_scraper.fetch_live_matches_async()
-            matches = [m for m in raw_matches if m.get("home_team") and m.get("away_team")]
-            if user_id not in USER_STATES:
-                USER_STATES[user_id] = {}
-            USER_STATES[user_id]["matches"] = matches
-
-        if not matches or match_idx < 0 or match_idx >= len(matches):
-            await asyncio.to_thread(self.client.answer_callback_query, cb_id, text="⚠️ Match data expired. Send /matches again.", show_alert=True)
+            msg_text = "⚠️ Match session expired. Send /matches to view current live matches."
+            await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False)
             return
 
         selected_match = matches[match_idx]
@@ -1214,32 +1289,31 @@ class TelegramOddsBot:
 
         USER_STATES[user_id]["selected_match"] = selected_match
 
+        home_short = clean_short_team_name(home_team)
+        away_short = clean_short_team_name(away_team)
+
         inline_keyboard = [
             [
-                {"text": f"🟢 {home_team} (Bhav: {home_bhav_str})", "callback_data": f"select_team:{match_idx}:0"}
+                {"text": f"🟢 {home_short} (Bhav: {home_bhav_str})", "callback_data": f"select_team:{match_idx}:0"}
             ],
             [
-                {"text": f"🔴 {away_team} (Bhav: {away_bhav_str})", "callback_data": f"select_team:{match_idx}:1"}
+                {"text": f"🔴 {away_short} (Bhav: {away_bhav_str})", "callback_data": f"select_team:{match_idx}:1"}
             ]
         ]
 
         reply_markup = {"inline_keyboard": inline_keyboard}
         msg_text = f"Select the team to monitor for <b>{home_team} vs {away_team}</b>:"
 
-        await asyncio.to_thread(self.client.answer_callback_query, cb_id)
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
 
     async def _handle_team_click_async(self, chat_id: str | int, user_id: int, match_idx: int, team_idx: int, cb_id: str):
-        """Step 3 Start: Prompt user for Target Odd upon team selection."""
+        """Step 3 Start: Instant 0-delay target odd prompt upon team selection."""
         user_state = USER_STATES.get(user_id, {})
         matches = user_state.get("matches", [])
 
         if not matches or match_idx < 0 or match_idx >= len(matches):
-            raw_matches = await global_exchange_scraper.fetch_live_matches_async()
-            matches = [m for m in raw_matches if m.get("home_team") and m.get("away_team")]
-
-        if not matches or match_idx < 0 or match_idx >= len(matches):
-            await asyncio.to_thread(self.client.answer_callback_query, cb_id, text="⚠️ Match data expired. Send /matches again.", show_alert=True)
+            msg_text = "⚠️ Match session expired. Send /matches to view current live matches."
+            await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False)
             return
 
         selected_match = matches[match_idx]
@@ -1276,7 +1350,6 @@ class TelegramOddsBot:
             f"Reply with your target bhav/odd (e.g., 20 or 1.20):"
         )
 
-        await asyncio.to_thread(self.client.answer_callback_query, cb_id)
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False)
 
     async def _handle_state_input_async(self, chat_id: str | int, user_id: int, text: str):
@@ -1558,27 +1631,18 @@ class TelegramOddsBot:
 
                 latest_odd = odds_data.get("target_odd") if odds_data else None
 
-                # Check Condition A & Condition B for Dual-Condition Auto Match-End
-                is_finished = odds_data.get("is_finished") if odds_data else False
-                status_str = (odds_data.get("status") or "").lower() if odds_data else ""
-                
-                # Active odds guard: if latest_odd > 1.01, match is definitely LIVE!
-                if latest_odd is not None and isinstance(latest_odd, (int, float)) and latest_odd > 1.01:
-                    is_finished = False
-                    track["frozen_since"] = None
-                else:
-                    if track.get("frozen_since") is None:
-                        track["frozen_since"] = time.time()
+                # 1. Stricter Match End Condition: Conclude ONLY if API/feed data explicitly returns COMPLETED, RESULT, or MATCH_OVER
+                is_finished_flag = odds_data.get("is_finished", False) if odds_data else False
+                status_str = (odds_data.get("status") or "").upper() if odds_data else ""
 
-                cond_a = (latest_odd is None or not isinstance(latest_odd, (int, float)) or latest_odd <= 1.01)
+                strict_end_keywords = ["COMPLETED", "RESULT", "MATCH_OVER", "MATCH ENDED", "FINISHED", "ABANDONED", "NO RESULT"]
+                is_explicitly_concluded = (
+                    any(kw in status_str for kw in strict_end_keywords) or
+                    (is_finished_flag and status_str not in ["IN-PLAY", "LIVE", "LIVE MATCH"])
+                )
 
-                strict_finished_kws = ["won", "finished", "concluded", "result", "match ended", "abandoned", "no result"]
-                status_finished = is_finished or any(kw in status_str for kw in strict_finished_kws)
-                frozen_duration = (time.time() - track["frozen_since"]) if track.get("frozen_since") else 0
-                cond_b = status_finished or (frozen_duration >= 300)
-
-                if cond_a and cond_b:
-                    logger.info(f"Dual-condition match-end met for chat {chat_id} ({team_name}). Cleaning up tracking task automatically.")
+                if is_explicitly_concluded:
+                    logger.info(f"Match explicitly concluded for chat {chat_id} (status: '{status_str}'). Cleaning up tracking task.")
                     target_val = track.get("target", track.get("target_odd", 0.0))
                     target_display = (track.get("target_team_clean") or team_name).upper()
                     has_triggered = track.get("has_triggered", False)
@@ -1588,11 +1652,14 @@ class TelegramOddsBot:
                         del ACTIVE_TRACKS[key]
                     if chat_id in ACTIVE_TRACKS:
                         del ACTIVE_TRACKS[chat_id]
+                    if str(chat_id) in ACTIVE_TRACKS:
+                        del ACTIVE_TRACKS[str(chat_id)]
                     save_active_jobs(ACTIVE_TRACKS)
                     self.engine.remove_track(chat_id)
 
-                    # Conditional Notification
-                    if not has_triggered:
+                    # Send conclusion notification ONCE
+                    if not has_triggered and not track.get("concluded_notified"):
+                        track["concluded_notified"] = True
                         winner_name = odds_data.get("winner") if odds_data else None
                         if not winner_name:
                             winner_name = target_display
@@ -1605,29 +1672,37 @@ class TelegramOddsBot:
                             f"⚠️ Target odd ({target_val:.2f}) was not reached.\n"
                             f"🛑 Live tracking session has ended and memory cleared."
                         )
-                        await asyncio.to_thread(self.client.send_message, chat_id, end_msg, "HTML", False)
+                        try:
+                            await asyncio.to_thread(self.client.send_message, chat_id, end_msg, "HTML", False)
+                        except Exception as e:
+                            logger.warning(f"Could not send conclusion message to {chat_id}: {e}")
 
                     task_key = str(chat_id)
                     if task_key in self.tracking_tasks:
-                        task = self.tracking_tasks.pop(task_key)
-                        task.cancel()
+                        task = self.tracking_tasks.pop(task_key, None)
+                        if task and not task.done():
+                            task.cancel()
                     break
 
-                if latest_odd is not None and isinstance(latest_odd, (int, float)) and latest_odd > 1.01:
-                    track["current_odd"] = latest_odd
-                    track["last_seen_odd"] = latest_odd
-                    if odds_data.get("opponent_team"):
-                        track["opponent_team"] = odds_data["opponent_team"]
-                        track["opponent_odd"] = odds_data["opponent_odd"]
-                    if odds_data.get("target_team"):
-                        track["target_team_clean"] = odds_data["target_team"]
-                    if odds_data.get("match_slug"):
-                        track["match_slug"] = odds_data["match_slug"]
-                    if track.get("entry") is None or not isinstance(track.get("entry"), (int, float)) or track.get("entry") <= 1.01:
-                        track["entry"] = latest_odd
-                        track["entry_odd"] = latest_odd
-                else:
-                    track["current_odd"] = None
+                # 2. Retain state and retry on next tick if odds are temporarily absent or suspended (ball in air, review, network glitch)
+                if latest_odd is None or not isinstance(latest_odd, (int, float)) or latest_odd <= 1.01:
+                    logger.debug(f"Odds suspended/absent for chat {chat_id}. Retaining previous state and retrying on next tick.")
+                    await asyncio.sleep(5.0)
+                    continue
+
+                # Live valid odds available (> 1.01)
+                track["current_odd"] = latest_odd
+                track["last_seen_odd"] = latest_odd
+                if odds_data.get("opponent_team"):
+                    track["opponent_team"] = odds_data["opponent_team"]
+                    track["opponent_odd"] = odds_data["opponent_odd"]
+                if odds_data.get("target_team"):
+                    track["target_team_clean"] = odds_data["target_team"]
+                if odds_data.get("match_slug"):
+                    track["match_slug"] = odds_data["match_slug"]
+                if track.get("entry") is None or not isinstance(track.get("entry"), (int, float)) or track.get("entry") <= 1.01:
+                    track["entry"] = latest_odd
+                    track["entry_odd"] = latest_odd
 
                 # 2. Check threshold trigger ONLY if real valid numeric odd (> 1.01) is scraped
                 curr = track.get("current_odd")
@@ -1705,62 +1780,92 @@ class TelegramOddsBot:
             await asyncio.sleep(5.0)
 
     async def _cmd_status_async(self, chat_id: str | int):
-        if chat_id not in ACTIVE_TRACKS and str(chat_id) not in ACTIVE_TRACKS:
-            await asyncio.to_thread(
-                self.client.send_message,
-                chat_id,
-                "ℹ️ No active match being tracked. Use /matches to select a match and set an alert.",
-                "HTML", False
+        try:
+            if chat_id not in ACTIVE_TRACKS and str(chat_id) not in ACTIVE_TRACKS:
+                await asyncio.to_thread(
+                    self.client.send_message,
+                    chat_id,
+                    "ℹ️ No active match being tracked. Use /matches to select a match and set an alert.",
+                    "HTML", False
+                )
+                return
+
+            key = chat_id if chat_id in ACTIVE_TRACKS else str(chat_id)
+            data = ACTIVE_TRACKS[key]
+
+            team_name = data.get("team", data.get("team_name", "Match"))
+            match_slug = data.get("match_slug")
+
+            odds_data = None
+            try:
+                if match_slug:
+                    odds_data = await global_exchange_scraper.get_live_odds_data_for_match_slug_async(match_slug, team_name)
+                else:
+                    odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
+            except Exception as ex:
+                logger.warning(f"Live odds fetch notice in /status for chat {chat_id}: {ex}")
+
+            if odds_data:
+                if isinstance(odds_data.get("target_odd"), (int, float)):
+                    data["current_odd"] = odds_data["target_odd"]
+                if odds_data.get("opponent_team"):
+                    data["opponent_team"] = odds_data["opponent_team"]
+                    data["opponent_odd"] = odds_data["opponent_odd"]
+                if odds_data.get("target_team"):
+                    data["target_team_clean"] = odds_data["target_team"]
+
+            target_display = (data.get("target_team_clean") or team_name).upper()
+            opp_display = (data.get("opponent_team") or "").upper()
+            match_title = f"{target_display} vs {opp_display}" if opp_display else target_display
+
+            target = data.get("target", data.get("target_odd", 0.0))
+            curr = data.get("current_odd")
+            if curr is None or not isinstance(curr, (int, float)) or curr <= 1.01:
+                curr = data.get("last_seen_odd") or data.get("entry_odd") or data.get("entry")
+
+            # If still None, await actual current odd directly
+            if curr is None or not isinstance(curr, (int, float)) or curr <= 1.01:
+                try:
+                    fresh_odd = await global_exchange_scraper.get_live_odd_for_team_async(team_name)
+                    if fresh_odd and isinstance(fresh_odd, (int, float)) and fresh_odd > 1.01:
+                        curr = fresh_odd
+                        data["current_odd"] = fresh_odd
+                        data["last_seen_odd"] = fresh_odd
+                except Exception as ex:
+                    logger.warning(f"Could not await live odd for status fallback: {ex}")
+
+            stake = data.get("stake", 1000.0)
+
+            if isinstance(curr, (int, float)) and curr > 1.01:
+                ind_curr = format_indian_odds(curr)
+                curr_str = f"{curr:.2f} (<code>{ind_curr}</code>)"
+            else:
+                target_ind_val = format_indian_odds(target) if isinstance(target, (int, float)) and target > 1.01 else "1-2"
+                curr_str = f"{target:.2f} (<code>{target_ind_val}</code>)"
+
+            target_ind = format_indian_odds(target) if isinstance(target, (int, float)) and target > 1.01 else f"{target:.2f}"
+
+            msg = (
+                f"📊 <b>Active Tracking Status</b>\n\n"
+                f"🏏 <b>Match:</b> {html.escape(match_title)}\n"
+                f"🟢 <b>Tracked Team:</b> {html.escape(target_display)}\n"
+                f"🎯 <b>Target Odd:</b> {target:.2f} (<code>{target_ind}</code>)\n"
+                f"⚡ <b>Current Live Bhav:</b> {curr_str}\n"
+                f"💰 <b>Stake:</b> ₹{stake:,.0f}\n\n"
+                f"<i>Alert will trigger automatically when target is reached.</i>"
             )
-            return
 
-        key = chat_id if chat_id in ACTIVE_TRACKS else str(chat_id)
-        data = ACTIVE_TRACKS[key]
-
-        team_name = data.get("team", data.get("team_name", "Match"))
-        match_slug = data.get("match_slug")
-
-        if match_slug:
-            odds_data = await global_exchange_scraper.get_live_odds_data_for_match_slug_async(match_slug, team_name)
-        else:
-            odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
-
-        if odds_data:
-            if isinstance(odds_data.get("target_odd"), (int, float)):
-                data["current_odd"] = odds_data["target_odd"]
-            if odds_data.get("opponent_team"):
-                data["opponent_team"] = odds_data["opponent_team"]
-                data["opponent_odd"] = odds_data["opponent_odd"]
-            if odds_data.get("target_team"):
-                data["target_team_clean"] = odds_data["target_team"]
-
-        target_display = (data.get("target_team_clean") or team_name).upper()
-        opp_display = (data.get("opponent_team") or "").upper()
-        match_title = f"{target_display} vs {opp_display}" if opp_display else target_display
-
-        target = data.get("target", data.get("target_odd", 0.0))
-        curr = data.get("current_odd")
-        stake = data.get("stake", 1000.0)
-
-        if isinstance(curr, (int, float)) and curr > 1.01:
-            ind_curr = format_indian_odds(curr)
-            curr_str = f"{curr:.2f} (<code>{ind_curr}</code>)"
-        else:
-            curr_str = "<i>Fetching live bhav...</i>"
-
-        target_ind = format_indian_odds(target) if isinstance(target, (int, float)) and target > 1.01 else f"{target:.2f}"
-
-        msg = (
-            f"📊 <b>Active Tracking Status</b>\n\n"
-            f"🏏 <b>Match:</b> {html.escape(match_title)}\n"
-            f"🟢 <b>Tracked Team:</b> {html.escape(target_display)}\n"
-            f"🎯 <b>Target Odd:</b> {target:.2f} (<code>{target_ind}</code>)\n"
-            f"⚡ <b>Current Live Bhav:</b> {curr_str}\n"
-            f"💰 <b>Stake:</b> ₹{stake:,.0f}\n\n"
-            f"<i>Alert will trigger automatically when target is reached.</i>"
-        )
-
-        await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
+            await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
+        except Exception as e:
+            logger.error(f"Error in /status handler for chat {chat_id}: {e}")
+            try:
+                fallback_msg = (
+                    "📊 <b>Active Tracking Status (Cached)</b>\n\n"
+                    "⚡ <i>Tracking session active. Target monitoring in progress...</i>"
+                )
+                await asyncio.to_thread(self.client.send_message, chat_id, fallback_msg, "HTML", False)
+            except Exception:
+                pass
 
     async def _cmd_stop_async(self, chat_id: str | int, args: list):
         team_filter = args[0].lower().strip() if args else None

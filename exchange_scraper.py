@@ -160,10 +160,18 @@ class ExchangeScraperEngine:
             current_loop = None
 
         if (
-            self._aiohttp_session is None
-            or self._aiohttp_session.closed
-            or (current_loop and getattr(self._aiohttp_session, "_loop", None) != current_loop)
+            self._aiohttp_session is not None
+            and not self._aiohttp_session.closed
+            and current_loop
+            and getattr(self._aiohttp_session, "_loop", None) != current_loop
         ):
+            try:
+                await self._aiohttp_session.close()
+            except Exception:
+                pass
+            self._aiohttp_session = None
+
+        if self._aiohttp_session is None or self._aiohttp_session.closed:
             connector = aiohttp.TCPConnector(ssl=False, limit=10, keepalive_timeout=30)
             timeout = aiohttp.ClientTimeout(total=6.0, connect=3.0)
             self._aiohttp_session = aiohttp.ClientSession(
@@ -326,12 +334,15 @@ class ExchangeScraperEngine:
         """
         Asynchronously fetches live match data directly from CREX match-list & cricket-live-score endpoints,
         extracting __NEXT_DATA__ JSON state and HTML fixture elements.
+        Strictly filters for LIVE in-play matches (drops completed, upcoming, result, abandoned, or >4h old matches).
+        Returns ONLY actively running matches (capped at 2 to 5 matches).
         """
         endpoints = [
             "/fixtures/match-list",
             "/cricket-live-score"
         ]
         crex_slugs = []
+        now_ts = time.time()
         for ep in endpoints:
             url = urllib.parse.urljoin(BASE_URL, ep)
             try:
@@ -347,6 +358,21 @@ class ExchangeScraperEngine:
                             if isinstance(m_list, list):
                                 for item in m_list:
                                     if isinstance(item, dict):
+                                        st = str(item.get("state") or item.get("status") or item.get("matchState") or "").upper()
+                                        in_p = bool(item.get("in_play") or item.get("inPlay") or (st in ["LIVE", "IN_PLAY", "INPLAY"]))
+                                        comp = bool(item.get("completed") or (st in ["COMPLETED", "RESULT", "FINISHED", "ABANDONED", "UPCOMING", "SCHEDULED"]))
+                                        
+                                        # Strict commence time check: discard matches commenced > 4 hours ago if completed/not in play
+                                        commence = item.get("commence_time") or item.get("commenced_at") or item.get("startTime") or item.get("matchStartTimestamp")
+                                        if commence and isinstance(commence, (int, float)):
+                                            if commence > 1e11:
+                                                commence /= 1000.0
+                                            if now_ts - commence > 4 * 3600 and not in_p:
+                                                comp = True
+
+                                        if comp or (st and st not in ["LIVE", "IN_PLAY", "INPLAY", ""] and "WON" in st):
+                                            continue
+
                                         s = item.get("slug") or item.get("matchSlug") or item.get("url") or item.get("link")
                                         if s and isinstance(s, str) and s not in crex_slugs:
                                             crex_slugs.append(s if s.startswith("/") else f"/cricket-live-score/{s}")
@@ -362,10 +388,12 @@ class ExchangeScraperEngine:
                 logger.warning(f"Error fetching CREX endpoint {ep}: {e}")
 
         matches = []
-        for slug in crex_slugs[:10]:
+        for slug in crex_slugs[:8]:
             match_data = await self._scrape_crex_match_page_async(slug)
             if match_data:
                 matches.append(match_data)
+                if len(matches) >= 5:  # Cap at 5 actively running matches
+                    break
         return matches
 
     def fetch_live_matches(self) -> List[Dict[str, Any]]:
@@ -470,10 +498,17 @@ class ExchangeScraperEngine:
                 header_str += " " + title_m.group(1)
 
             # Non-live / finished match status detection
-            non_live_pattern = r'\b(won by|concluded|abandoned|no result|match ended|match finished|match tied|completed|result|upcoming|scheduled|postponed|cancelled)\b'
+            non_live_pattern = r'\b(won by|concluded|abandoned|no result|match ended|match finished|match tied|completed|result|upcoming|scheduled|postponed|cancelled|finished|stumps|day ended)\b'
             if re.search(non_live_pattern, header_str, re.IGNORECASE):
                 is_finished = True
                 status_text = header_str.strip()
+
+            # Inspect state fields inside HTML if present
+            state_match = re.search(r'"(?:state|matchState|liveState|mState|status)"\s*:\s*"([^"]+)"', clean_html, re.IGNORECASE)
+            if state_match:
+                st_val = state_match.group(1).upper()
+                if st_val in ["COMPLETED", "RESULT", "FINISHED", "UPCOMING", "SCHEDULED", "ABANDONED", "POSTPONED", "CANCELLED"]:
+                    is_finished = True
 
             if is_finished:
                 w_match = re.search(r'([A-Za-z0-9\s\-]+?)\s+(?:won|win|victory)\b', header_str, re.IGNORECASE)
@@ -495,8 +530,24 @@ class ExchangeScraperEngine:
 
             has_live_odds = bool((rel_t1_b and rel_t1_b > 1.0) or (rel_t2_b and rel_t2_b > 1.0) or r_match or t1_override or t2_override)
 
-            # STRICT FILTER: Drop match immediately if finished, upcoming, abandoned, or missing live odds!
-            if is_finished or not has_live_odds:
+            # STRICT FILTER: Preserve explicit completed state for finished matches, return None for temporary missing odds
+            if is_finished:
+                return {
+                    "id": slug,
+                    "match_id": slug,
+                    "match_slug": slug,
+                    "title": f"{team1} vs {team2}",
+                    "sport": "Crex Live Score",
+                    "status": status_text or "COMPLETED",
+                    "is_finished": True,
+                    "winner": winning_team,
+                    "crex_url": full_url,
+                    "home_team": team1,
+                    "away_team": team2,
+                    "odds": []
+                }
+
+            if not has_live_odds:
                 return None
 
             status_text = "In-Play"
