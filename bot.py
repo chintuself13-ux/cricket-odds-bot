@@ -1058,14 +1058,15 @@ class TelegramOddsBot:
                 matches.append(m)
 
         if not matches:
-            msg = "🏏 Currently no live matches are in-play. Please check back when a live game starts."
+            msg = "🏏 Currently no live cricket matches are in-play on CREX. Please check back when a live game starts."
             await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
             return
 
-        lines = []
+        lines = ["🏏 <b>LIVE CREX IN-PLAY MATCHES</b>\n"]
         for m in matches:
             home_team = m.get("home_team", "Team 1")
             away_team = m.get("away_team", "Team 2")
+            match_status = m.get("status", "In-Play")
             odds_list = m.get("odds", [])
 
             # Extract home and away odds strictly preserving official fixture order
@@ -1087,14 +1088,14 @@ class TelegramOddsBot:
             home_win = int(round((1.0 / max(1.01, home_odd['back'])) * 100))
             away_win = int(round((1.0 / max(1.01, away_odd['back'])) * 100))
 
-            home_line = f"• {home_team}{home_fav_tag}: {home_ind} ({home_odd['back']:.2f} / {home_odd['lay']:.2f}) | {home_win}% Win"
-            away_line = f"• {away_team}{away_fav_tag}: {away_ind} ({away_odd['back']:.2f} / {away_odd['lay']:.2f}) | {away_win}% Win"
+            home_line = f"• {home_team}{home_fav_tag}: <b>{home_ind}</b> ({home_odd['back']:.2f} / {home_odd['lay']:.2f}) | {home_win}% Win"
+            away_line = f"• {away_team}{away_fav_tag}: <b>{away_ind}</b> ({away_odd['back']:.2f} / {away_odd['lay']:.2f}) | {away_win}% Win"
 
             home_target = round(max(1.02, home_odd['back'] - 0.07), 2) if is_home_fav else round(max(1.10, home_odd['back'] * 0.53), 2)
             away_target = round(max(1.02, away_odd['back'] - 0.07), 2) if not is_home_fav else round(max(1.10, away_odd['back'] * 0.53), 2)
 
             lines.append(
-                f"🏏 <b>{home_team} vs {away_team}</b> (In-Play)\n"
+                f"🏏 <b>{home_team} vs {away_team}</b> ({match_status})\n"
                 f"{home_line}\n"
                 f"{away_line}\n\n"
                 f"👉 <code>/track {home_team} {home_target:.2f} 1000</code>\n"

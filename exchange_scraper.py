@@ -177,14 +177,28 @@ class ExchangeScraperEngine:
             async with session.get(url) as resp:
                 if resp.status == 200:
                     return await resp.text()
-                return None
         except (RuntimeError, asyncio.CancelledError, aiohttp.ClientError) as e:
-            logger.warning(f"aiohttp fetch loop notice for {url}: {e}")
-            await asyncio.sleep(3)
-            return None
+            logger.debug(f"aiohttp fetch notice for {url}: {e}")
         except Exception as e:
-            logger.warning(f"Unexpected fetch error for {url}: {e}")
-            return None
+            logger.debug(f"Unexpected fetch error for {url}: {e}")
+
+        # Robust fast httpx async scraping fallback with browser headers
+        try:
+            import httpx
+            headers = {
+                **self.http_headers,
+                "Accept-Language": "en-US,en;q=0.9",
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"'
+            }
+            async with httpx.AsyncClient(headers=headers, timeout=6.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    return resp.text
+        except Exception as e:
+            logger.debug(f"httpx fallback notice for {url}: {e}")
+        return None
 
     async def _fetch_url_text_with_retry(self, url: str, max_retries: int = 3, base_delay: float = 1.5) -> Optional[str]:
         """
