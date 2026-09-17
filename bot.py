@@ -768,10 +768,15 @@ class TelegramOddsBot:
             elif cmd == "/matches":
                 asyncio.create_task(self._cmd_matches_async(chat_id, user_id))
             elif cmd == "/track":
-                asyncio.create_task(self._cmd_track_async(chat_id, user_id, parts[1:]))
-            elif cmd == "/status":
+                asyncio.create_task(asyncio.to_thread(
+                    self.client.send_message,
+                    chat_id,
+                    "ℹ️ Manual <code>/track</code> is deprecated.\nPlease use <code>/matches</code> to select a live match, choose a team, and set your target odd &amp; stake interactively.",
+                    "HTML", False
+                ))
+            elif cmd in ["/status", "/myalert"]:
                 asyncio.create_task(self._cmd_status_async(chat_id))
-            elif cmd == "/stop":
+            elif cmd in ["/stop", "/untrack"]:
                 asyncio.create_task(self._cmd_stop_async(chat_id, parts[1:]))
             elif cmd == "/mute":
                 asyncio.create_task(self._cmd_mute_async(chat_id, parts[1:], muted=True))
@@ -802,13 +807,18 @@ class TelegramOddsBot:
         username = f"@{html.escape(str(uname))}" if uname else "No username"
 
         user_msg = (
-            "👋 <b>Welcome to Odds Alert Bot!</b>\n"
-            "Track live exchange rates hands-free. Receive instant loud siren alerts &amp; cashout formulas on target hit.\n\n"
-            "📌 <b>How to use:</b>\n"
-            "1. /matches - View active in-play cricket matches.\n"
-            "2. /track &lt;TEAM&gt; &lt;TARGET&gt; &lt;STAKE&gt; - Lock match &amp; start tracking.\n"
-            "   Example: <code>/track IND 1.45 1000</code>\n"
-            "3. /stop - Stop tracking manually anytime.\n\n"
+            "🤖 <b>Cricket Live Odds Alert Bot</b>\n\n"
+            "Track real-time ball-to-ball cricket market bhav and get instant continuous siren alerts.\n\n"
+            "📌 <b>Available Commands:</b>\n"
+            "• <code>/matches</code> - View live in-play matches &amp; set new odds alert\n"
+            "• <code>/status</code> - Check current live bhav &amp; tracking progress\n"
+            "• <code>/untrack</code> - Stop &amp; cancel the current active alert\n"
+            "• <code>/help</code> - Show this guide\n\n"
+            "⚡ <b>How to use:</b>\n"
+            "1. Click <code>/matches</code> to see live games.\n"
+            "2. Select your match and team using buttons.\n"
+            "3. Enter your target odd &amp; stake.\n"
+            "4. Bot will continuously ring siren alerts once your odd hits!\n\n"
             "🎁 <b>Your 3-Day Free Trial Request has been submitted! Admin will activate your access shortly.</b>"
         )
         asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, user_msg, "HTML", False))
@@ -1089,30 +1099,29 @@ class TelegramOddsBot:
     def _cmd_start(self, chat_id: str | int, user_id: Optional[str | int] = None):
         is_admin = (user_id and (user_id == DEFAULT_ADMIN_ID or str(user_id) == str(DEFAULT_ADMIN_ID)))
         admin_extra = (
+            "\n\n👑 <b>Admin Commands:</b>\n"
             "• <code>/allow &lt;user_id&gt; &lt;duration&gt;</code> — Grant access (e.g. <code>/allow 12345678 30d</code>)\n"
             "• <code>/revoke &lt;user_id&gt;</code> — Revoke user authorization\n"
             "• <code>/reject &lt;user_id&gt;</code> — Reject user payment\n"
             "• <code>/msg &lt;user_id&gt; &lt;text&gt;</code> — Direct message user\n"
-            "• <code>/users</code> — View all active users & remaining days\n"
+            "• <code>/users</code> — View all active users &amp; remaining days\n"
+            "• <code>/setodd &lt;team&gt; &lt;odd&gt;</code> — Modify live odd for instant testing"
         ) if is_admin else ""
 
         help_text = (
-            "💰 <b>LIVE CRICKET ODDS ALERT & CASHOUT CALCULATOR BOT</b> ⚡\n\n"
-            "Monitor live cricket exchange rates with an <b>automated Green Book Cashout Calculator</b>! "
-            "Get <b>exact Lay stakes & guaranteed profit numbers</b> sent directly in alert messages!\n\n"
-            "📌 <b>COMMAND SYNTAX:</b>\n\n"
-            "• <code>/track &lt;team&gt; &lt;target_odd&gt; [stake]</code>\n"
-            "  <i>Auto Live Entry:</i> <code>/track Zimbabwe 2.40 1000</code>\n"
-            "  <i>Quick Track:</i> <code>/track Australia 1.06 1000</code>\n\n"
-            "• <code>/matches</code> — View live matches with Win Chance %, Decimal & Indian (Paresh/Lagan) Odds\n"
-            "• <code>/status</code> — View active tracked matches, live odds, elapsed time & instant cashout\n"
-            "• <code>/buy</code> — View ₹50 subscription plan & payment QR\n"
-            "• <code>/feedback &lt;text&gt;</code> — Send feedback or query to admin\n"
-            "• <code>/mute</code> — Silence repeating alert notifications without ending tracking\n"
-            "• <code>/unmute</code> — Resume alert notifications\n"
-            "• <code>/stop [team]</code> — Stop tracking a match and clear background task\n"
+            "🤖 <b>Cricket Live Odds Alert Bot</b>\n\n"
+            "Track real-time ball-to-ball cricket market bhav and get instant continuous siren alerts.\n\n"
+            "📌 <b>Available Commands:</b>\n"
+            "• <code>/matches</code> - View live in-play matches &amp; set new odds alert\n"
+            "• <code>/status</code> - Check current live bhav &amp; tracking progress\n"
+            "• <code>/untrack</code> - Stop &amp; cancel the current active alert\n"
+            "• <code>/help</code> - Show this guide\n\n"
+            "⚡ <b>How to use:</b>\n"
+            "1. Click <code>/matches</code> to see live games.\n"
+            "2. Select your match and team using buttons.\n"
+            "3. Enter your target odd &amp; stake.\n"
+            "4. Bot will continuously ring siren alerts once your odd hits!"
             f"{admin_extra}"
-            "• <code>/setodd &lt;team&gt; &lt;odd&gt;</code> — Modify live odd for instant testing (e.g., <code>/setodd India 0.25</code>)\n"
         )
         self.client.send_message(chat_id, help_text)
 
@@ -1700,7 +1709,8 @@ class TelegramOddsBot:
             await asyncio.to_thread(
                 self.client.send_message,
                 chat_id,
-                "ℹ️ No active tracking job."
+                "ℹ️ No active match being tracked. Use /matches to select a match and set an alert.",
+                "HTML", False
             )
             return
 
@@ -1708,7 +1718,12 @@ class TelegramOddsBot:
         data = ACTIVE_TRACKS[key]
 
         team_name = data.get("team", data.get("team_name", "Match"))
-        odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
+        match_slug = data.get("match_slug")
+
+        if match_slug:
+            odds_data = await global_exchange_scraper.get_live_odds_data_for_match_slug_async(match_slug, team_name)
+        else:
+            odds_data = await global_exchange_scraper.get_live_odds_data_for_team_async(team_name)
 
         if odds_data:
             if isinstance(odds_data.get("target_odd"), (int, float)):
@@ -1721,68 +1736,28 @@ class TelegramOddsBot:
 
         target_display = (data.get("target_team_clean") or team_name).upper()
         opp_display = (data.get("opponent_team") or "").upper()
-        opp_odd = data.get("opponent_odd")
-
-        opp_line = ""
-        if opp_display and isinstance(opp_odd, (int, float)):
-            opp_ind = format_indian_odds(opp_odd)
-            opp_line = f"⚔️ <b>Opponent Odd ({html.escape(opp_display)}):</b> {opp_odd:.2f} (<code>{opp_ind}</code>)\n"
+        match_title = f"{target_display} vs {opp_display}" if opp_display else target_display
 
         target = data.get("target", data.get("target_odd", 0.0))
         curr = data.get("current_odd")
-        entry = data.get("entry", data.get("entry_odd"))
         stake = data.get("stake", 1000.0)
 
         if isinstance(curr, (int, float)) and curr > 1.01:
-            ind_str = format_indian_odds(curr)
-            curr_str = f"<b>{curr:.2f}</b> (<code>{ind_str}</code>)"
-            curr_val = curr
+            ind_curr = format_indian_odds(curr)
+            curr_str = f"{curr:.2f} (<code>{ind_curr}</code>)"
         else:
-            curr_str = "<i>Fetching live feed...</i>"
-            curr_val = None
+            curr_str = "<i>Fetching live bhav...</i>"
 
-        if isinstance(entry, (int, float)) and entry > 1.01:
-            ind_entry = format_indian_odds(entry)
-            entry_str = f"<b>{entry:.2f}</b> (<code>{ind_entry}</code>)"
-            entry_val = entry
-        else:
-            entry_str = "<i>Pending...</i>"
-            entry_val = None
-
-        target_ind = format_indian_odds(target) if isinstance(target, (int, float)) and target > 1.01 else ""
-
-        if curr_val and entry_val:
-            lay_stake = round((entry_val * stake) / max(0.01, curr_val), 2)
-            profit = round(lay_stake - stake, 2)
-            cashout_block = (
-                f"💰 <b>Live Cashout Calculation:</b>\n"
-                f"👉 Lay <b>₹{lay_stake:,.2f}</b> on <b>{html.escape(target_display)}</b> @ <b>{curr_val:.2f}</b>\n"
-                f"💚 Guaranteed Profit: <b>+₹{profit:,.2f}</b>\n"
-            )
-        else:
-            cashout_block = (
-                f"💰 <b>Live Cashout Calculation:</b>\n"
-                f"<i>Waiting for live exchange odds feed...</i>\n"
-            )
-
-        status_icon = "🚨 ALERT TRIGGERED" if data.get("status") == "TRIGGERED" else "🟢 ACTIVE"
-        mute_str = " (🔕 Muted)" if data.get("muted") else ""
-
-        elapsed = int(time.time() - data.get("start_time", time.time()))
-        mins, secs = divmod(elapsed, 60)
-        hrs, mins = divmod(mins, 60)
-        elapsed_str = f"{hrs}h {mins}m {secs}s" if hrs > 0 else (f"{mins}m {secs}s" if mins > 0 else f"{secs}s")
+        target_ind = format_indian_odds(target) if isinstance(target, (int, float)) and target > 1.01 else f"{target:.2f}"
 
         msg = (
-            f"📊 <b>LIVE TRACKING STATUS</b>\n\n"
-            f"🎯 <b>Target:</b> {html.escape(target_display)} &lt;= {target:.2f} (<code>{target_ind}</code>){mute_str}\n"
-            f"📈 <b>Current Live Odd ({html.escape(target_display)}):</b> {curr_str}\n"
-            f"{opp_line}"
-            f"📊 <b>Entry Odd (Auto):</b> {entry_str} | <b>Stake:</b> ₹{stake:,.0f}\n"
-            f"📡 <b>Data Source:</b> ⚡ Live Exchange Feed\n"
-            f"⏱ <b>Elapsed Tracking Time:</b> {elapsed_str}\n\n"
-            f"{cashout_block}"
-            f"Status: {status_icon}"
+            f"📊 <b>Active Tracking Status</b>\n\n"
+            f"🏏 <b>Match:</b> {html.escape(match_title)}\n"
+            f"🟢 <b>Tracked Team:</b> {html.escape(target_display)}\n"
+            f"🎯 <b>Target Odd:</b> {target:.2f} (<code>{target_ind}</code>)\n"
+            f"⚡ <b>Current Live Bhav:</b> {curr_str}\n"
+            f"💰 <b>Stake:</b> ₹{stake:,.0f}\n\n"
+            f"<i>Alert will trigger automatically when target is reached.</i>"
         )
 
         await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
@@ -1814,11 +1789,11 @@ class TelegramOddsBot:
             await asyncio.to_thread(
                 self.client.send_message,
                 chat_id,
-                f"🛑 <b>SIREN ALARM STOPPED & TRACKING ENDED!</b>\nCleared active tracking session for: <b>{', '.join(removed)}</b>",
+                f"🛑 <b>TRACKING CANCELLED!</b>\nCleared active tracking session for: <b>{', '.join(removed)}</b>",
                 "HTML", False
             )
         else:
-            await asyncio.to_thread(self.client.send_message, chat_id, "ℹ️ No matching active tracks found to stop.", "HTML", False)
+            await asyncio.to_thread(self.client.send_message, chat_id, "ℹ️ No active match being tracked.", "HTML", False)
 
     async def _cmd_mute_async(self, chat_id: str | int, args: list, muted: bool):
         team_filter = args[0].lower().strip() if args else None
