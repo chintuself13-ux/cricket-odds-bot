@@ -203,25 +203,49 @@ class ExchangeScraperEngine:
 
     def _extract_relative_dom_odds(self, clean_html: str, team1: str, team2: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
         """
-        Relative Traversal: Locates target team's specific label node first in HTML DOM,
-        then strictly queries its immediate sibling/child odds element within next 400 chars.
-        Never assigns odds based on array indexes.
+        Team-Isolated Relative DOM Odds Extraction:
+        1. Locates Team 1's DOM container explicitly and truncates BEFORE Team 2's label.
+        2. Locates Team 2's DOM container explicitly and truncates BEFORE Team 1's label.
+        3. Extracts only rates strictly belonging to that specific team's DOM container.
+        4. Validates that Lay rate is a valid spread (cand_l >= b_val and cand_l <= b_val * 1.35)
+           to prevent capturing the opponent's Back rate as Lay rate.
         Returns (team1_back, team1_lay, team2_back, team2_lay).
         """
         t1_b, t1_l, t2_b, t2_l = None, None, None, None
-        
-        for t_name, is_t1 in [(team1, True), (team2, False)]:
-            if not t_name:
-                continue
+
+        if not team1 or not team2:
+            return t1_b, t1_l, t2_b, t2_l
+
+        for t_name, other_name, is_t1 in [(team1, team2, True), (team2, team1, False)]:
             pattern = re.escape(t_name)
+            other_pattern = re.escape(other_name) if other_name else None
+
             for m in re.finditer(pattern, clean_html, re.IGNORECASE):
                 start = m.start()
-                snippet = clean_html[start:start + 400]
+                raw_snippet = clean_html[start:start + 450]
+
+                if other_pattern:
+                    other_m = re.search(other_pattern, raw_snippet, re.IGNORECASE)
+                    if other_m and other_m.start() > 0:
+                        snippet = raw_snippet[:other_m.start()]
+                    else:
+                        snippet = raw_snippet
+                else:
+                    snippet = raw_snippet
+
                 rate_matches = re.findall(r'\b(1\.\d{2}|[2-9]\.\d{2}|[1-9]\d\.\d{2})\b', snippet)
                 if rate_matches:
                     try:
                         b_val = float(rate_matches[0])
-                        l_val = float(rate_matches[1]) if len(rate_matches) > 1 else round(b_val + 0.02, 2)
+                        l_val = None
+                        if len(rate_matches) > 1:
+                            cand_l = float(rate_matches[1])
+                            if cand_l >= b_val and (cand_l <= b_val * 1.35 or cand_l <= b_val + 0.50):
+                                l_val = cand_l
+                        
+                        if l_val is None:
+                            l_val = round(b_val + (0.02 if b_val < 2.0 else 0.50), 2)
+
                         if is_t1:
                             t1_b, t1_l = b_val, l_val
                         else:
@@ -427,7 +451,7 @@ class ExchangeScraperEngine:
             rel_t1_b, rel_t1_l, rel_t2_b, rel_t2_l = self._extract_relative_dom_odds(clean_html, team1, team2)
 
             # GUARD ACTIVE ODDS: If live R field or relative odds exist, match is definitely LIVE!
-            if r_match or (rel_t1_b and rel_t2_b):
+            if r_match or rel_t1_b or rel_t2_b:
                 is_finished = False
                 status_text = "In-Play"
             
@@ -441,11 +465,26 @@ class ExchangeScraperEngine:
                 else:
                     fav_team_num = 1
 
-            if rel_t1_b and rel_t2_b:
-                t1_back = t1_override or rel_t1_b
-                t1_lay = rel_t1_l or round(t1_back + 0.02, 2)
-                t2_back = t2_override or rel_t2_b
-                t2_lay = rel_t2_l or round(t2_back + 0.02, 2)
+            if rel_t1_b or rel_t2_b:
+                if rel_t1_b and rel_t2_b:
+                    t1_back = t1_override or rel_t1_b
+                    t1_lay = rel_t1_l or round(t1_back + (0.02 if t1_back < 2.0 else 0.50), 2)
+                    t2_back = t2_override or rel_t2_b
+                    t2_lay = rel_t2_l or round(t2_back + (0.02 if t2_back < 2.0 else 0.50), 2)
+                elif rel_t1_b:
+                    t1_back = t1_override or rel_t1_b
+                    t1_lay = rel_t1_l or round(t1_back + (0.02 if t1_back < 2.0 else 0.50), 2)
+                    p1 = 1.0 / max(1.01, t1_lay)
+                    p2_back = max(0.02, 1.0 - p1 - 0.003)
+                    t2_back = t2_override or round(1.0 / p2_back, 2)
+                    t2_lay = round(t2_back + (0.02 if t2_back < 2.0 else 0.50), 2)
+                else:
+                    t2_back = t2_override or rel_t2_b
+                    t2_lay = rel_t2_l or round(t2_back + (0.02 if t2_back < 2.0 else 0.50), 2)
+                    p2 = 1.0 / max(1.01, t2_lay)
+                    p1_back = max(0.02, 1.0 - p2 - 0.003)
+                    t1_back = t1_override or round(1.0 / p1_back, 2)
+                    t1_lay = round(t1_back + (0.02 if t1_back < 2.0 else 0.50), 2)
             elif r_match:
                 p_back = float(r_match.group(1))
                 offset = float(r_match.group(2))
