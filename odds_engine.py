@@ -19,9 +19,14 @@ from exchange_scraper import global_exchange_scraper, format_indian_odds
 
 logger = logging.getLogger("OddsEngine")
 
-def send_telegram_alert(bot_token: str, chat_id: str | int, message: str) -> Tuple[bool, str]:
+def send_telegram_alert(
+    bot_token: str,
+    chat_id: str | int,
+    message: str,
+    reply_markup: Optional[Dict[str, Any]] = None
+) -> Tuple[bool, str]:
     """
-    Dispatches HTML alert message to Telegram Bot API with notification sound enabled.
+    Dispatches HTML alert message to Telegram Bot API with notification sound enabled and inline keyboard.
     """
     if not bot_token or not chat_id:
         err = "Bot token or Chat ID missing"
@@ -41,6 +46,8 @@ def send_telegram_alert(bot_token: str, chat_id: str | int, message: str) -> Tup
         "disable_web_page_preview": True,
         "disable_notification": False
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     try:
         data = json.dumps(payload).encode("utf-8")
@@ -115,6 +122,8 @@ class TrackJob:
         self.start_time: float = time.time()
         self.consecutive_errors = 0
         self.status = "active"
+        self.siren_burst_done = False
+        self.last_siren_time = 0.0
 
     def get_elapsed_time_str(self) -> str:
         elapsed = int(time.time() - self.start_time)
@@ -330,37 +339,46 @@ class MultiTrackOddsEngine:
                     job.status = "triggered"
                     now = time.time()
 
-                    print(f"[ALERT TRIGGERED] Sending alert for {job.team_name} with odd {live_odd:.2f}", flush=True)
+                    cashout = job.calculate_cashout(live_odd)
+                    op_html = "&lt;=" if job.operator == "<=" else "&gt;="
+                    ind_odd = format_indian_odds(live_odd)
 
-                    if not job.muted and (now - job.last_alert_time >= 3.0):
-                        job.last_alert_time = now
+                    reply_markup = {
+                        "inline_keyboard": [
+                            [{"text": "⏹️ Stop Siren / Cashout Done", "callback_data": f"stop_siren:{job.chat_id}:{job.team_name}"}]
+                        ]
+                    }
 
-                        cashout = job.calculate_cashout(live_odd)
-                        op_html = "&lt;=" if job.operator == "<=" else "&gt;="
-                        ind_odd = format_indian_odds(live_odd)
-                        
-                        alert_msg = (
-                            f"🚨 <b>HIGH PRIORITY ODDS ALERT! TARGET HIT!</b> 🚨\n\n"
-                            f"🎯 <b>Target Team:</b> {html.escape(job.team_name.upper())}\n"
-                            f"📈 <b>Current Live Odd:</b> {live_odd:.2f} (<code>{ind_odd}</code>) [Target: {op_html} {job.threshold:.2f}]\n"
-                            f"📡 <b>Data Source:</b> {source_name}\n"
-                            f"📊 <b>Entry Odd (Auto Locked):</b> {cashout['entry_odd']:.2f}\n"
-                            f"💵 <b>Invested Stake:</b> ₹{cashout['stake']:,.0f}\n\n"
-                            f"💰 <b>GREEN BOOK CASHOUT BREAKDOWN:</b>\n"
-                            f"👉 <b>LAY AMOUNT TO PLACE ON EXCHANGE:</b> Place <b>₹{cashout['lay_stake']:,.2f} Lay</b> @ {live_odd:.2f}\n"
-                            f"💚 <b>PROJECTED GREEN BOOK PROFIT:</b> <b>+₹{cashout['profit']:,.2f}</b> (Both sides equal profit)\n\n"
-                            f"⚡ <b>ACTION REQUIRED:</b> Place exact Lay amount of <b>₹{cashout['lay_stake']:,.2f}</b> on exchange to lock both-side profit immediately!\n\n"
-                            f"Send <code>/mute</code> to silence alerts or <code>/stop</code> to end."
-                        )
+                    alert_msg = (
+                        f"🚨🚨🚨 <b>ODDS ALERT HIT!</b> 🚨🚨🚨\n\n"
+                        f"🎯 <b>Target Team:</b> {html.escape(job.team_name.upper())}\n"
+                        f"📈 <b>Current Live Odd:</b> {live_odd:.2f} (<code>{ind_odd}</code>) [Target: {op_html} {job.threshold:.2f}]\n"
+                        f"💰 <b>Stake:</b> ₹{cashout['stake']:,.0f}\n"
+                        f"💵 <b>LAY AMOUNT TO PLACE:</b> Lay <b>₹{cashout['lay_stake']:,.2f}</b> @ {live_odd:.2f}\n"
+                        f"💚 <b>PROJECTED NET PROFIT:</b> +₹{cashout['profit']:,.2f} (Green Book Profit)\n\n"
+                        f"⚡ Tap button below to stop siren & complete cashout!"
+                    )
 
-                        try:
-                            if self.bot_token and job.chat_id:
-                                ok, info = send_telegram_alert(self.bot_token, job.chat_id, alert_msg)
-                                print(f"[TELEGRAM DISPATCH STATUS] Chat ID: {job.chat_id} | Success: {ok} | Details: {info}", flush=True)
-                            else:
-                                print(f"[SEND ERROR] Missing bot_token ({bool(self.bot_token)}) or chat_id ({job.chat_id})", flush=True)
-                        except Exception as e:
-                            print(f"[SEND ERROR] Exception in alert sending block: {e}", flush=True)
+                    if not job.muted:
+                        # 1. Fire rapid burst of 5 siren messages on initial target hit
+                        if not job.siren_burst_done:
+                            job.siren_burst_done = True
+                            job.last_siren_time = now
+                            for _ in range(5):
+                                try:
+                                    if self.bot_token and job.chat_id:
+                                        send_telegram_alert(self.bot_token, job.chat_id, alert_msg, reply_markup=reply_markup)
+                                        time.sleep(0.2)
+                                except Exception as e:
+                                    print(f"[SIREN BURST ERROR] {e}", flush=True)
+                        # 2. Continuous reminder siren every 10 seconds until user taps stop button
+                        elif now - job.last_siren_time >= 10.0:
+                            job.last_siren_time = now
+                            try:
+                                if self.bot_token and job.chat_id:
+                                    send_telegram_alert(self.bot_token, job.chat_id, alert_msg, reply_markup=reply_markup)
+                            except Exception as e:
+                                print(f"[REMINDER SIREN ERROR] {e}", flush=True)
 
                     if self.on_alert_trigger:
                         self.on_alert_trigger(job, live_odd)
@@ -369,6 +387,7 @@ class MultiTrackOddsEngine:
                         print(f"[ALERT RESET] {job.team_name} odd recovered ({live_odd:.2f} > {job.threshold:.2f}). State reset for fresh alerts.", flush=True)
                     job.status = "active"
                     job.last_alert_time = 0.0
+                    job.siren_burst_done = False
 
             else:
                 job.status = "warning"

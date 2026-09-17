@@ -198,6 +198,49 @@ class TelegramBotClient:
 # Global dictionary for instant 0ms /status response: ACTIVE_TRACKS[chat_id]
 ACTIVE_TRACKS: Dict[Any, Dict[str, Dict[str, Any]]] = {}
 
+# User state machine tracking for interactive Telegram inline flows: USER_STATES[user_id]
+USER_STATES: Dict[int, Dict[str, Any]] = {}
+
+
+def parse_target_odd_input(val_str: str) -> Optional[float]:
+    """
+    Parses user input for target odd.
+    Handles both Indian ground paise inputs (e.g. '20' -> 1.20, '85' -> 1.85, '5' -> 1.05, '0.20' -> 1.20)
+    and decimal odd inputs (e.g. '1.20' -> 1.20, '2.40' -> 2.40).
+    Returns rounded float decimal odd or None if invalid.
+    """
+    s = val_str.strip().replace("₹", "").replace("$", "")
+    try:
+        val = float(s)
+        if val <= 0:
+            return None
+        # If user entered fractional paise like 0.20 or .20 (< 1.0)
+        if val < 1.0:
+            val = 1.0 + val
+        # If user entered integer paise without decimal point (e.g. '20', '85', '5', '115')
+        elif "." not in s and val >= 2.0:
+            val = 1.0 + (val / 100.0)
+        return round(val, 2)
+    except (ValueError, TypeError):
+        return None
+
+
+
+def parse_stake_input(val_str: str) -> Optional[float]:
+    """
+    Parses user input for stake amount.
+    Returns float (0 or positive) or None if invalid.
+    """
+    s = val_str.strip().replace("₹", "").replace("$", "").replace(",", "")
+    try:
+        val = float(s)
+        if val < 0:
+            return None
+        return round(val, 2)
+    except (ValueError, TypeError):
+        return None
+
+
 # Force UTF-8 encoding for Windows console output
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -598,17 +641,43 @@ class TelegramOddsBot:
             cb_data = callback_query.get("data", "")
             msg = callback_query.get("message", {})
             chat_id = msg.get("chat", {}).get("id")
+            from_user = callback_query.get("from", {})
+            raw_user_id = from_user.get("id", chat_id)
+            try:
+                user_id = int(raw_user_id)
+            except (ValueError, TypeError):
+                user_id = raw_user_id
 
-            if cb_id:
-                asyncio.create_task(asyncio.to_thread(
-                    self.client.answer_callback_query,
-                    cb_id,
-                    text="🛑 Siren Alarm Stopped!",
-                    show_alert=True
-                ))
+            if cb_data.startswith("stop_siren:") or cb_data in ["stop_alarm", "mute_alarm", "stop_tracking"]:
+                if cb_id:
+                    asyncio.create_task(asyncio.to_thread(
+                        self.client.answer_callback_query,
+                        cb_id,
+                        text="🛑 Siren Alarm Stopped!",
+                        show_alert=True
+                    ))
+                if chat_id:
+                    asyncio.create_task(self._cmd_stop_async(chat_id, []))
+                return
 
-            if cb_data in ["stop_alarm", "mute_alarm", "stop_tracking"] and chat_id:
-                asyncio.create_task(self._cmd_stop_async(chat_id, []))
+            if cb_data.startswith("match:"):
+                try:
+                    match_idx = int(cb_data.split(":")[1])
+                    asyncio.create_task(self._handle_match_click_async(chat_id, user_id, match_idx, cb_id))
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"Invalid match callback data ({cb_data}): {e}")
+                return
+
+            if cb_data.startswith("select_team:"):
+                try:
+                    parts = cb_data.split(":")
+                    match_idx = int(parts[1])
+                    team_idx = int(parts[2])
+                    asyncio.create_task(self._handle_team_click_async(chat_id, user_id, match_idx, team_idx, cb_id))
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"Invalid select_team callback data ({cb_data}): {e}")
+                return
+
             return
 
         message = update.get("message")
@@ -697,7 +766,7 @@ class TelegramOddsBot:
             if cmd in ["/start", "/help"]:
                 self._cmd_start(chat_id, user_id)
             elif cmd == "/matches":
-                asyncio.create_task(self._cmd_matches_async(chat_id))
+                asyncio.create_task(self._cmd_matches_async(chat_id, user_id))
             elif cmd == "/track":
                 asyncio.create_task(self._cmd_track_async(chat_id, user_id, parts[1:]))
             elif cmd == "/status":
@@ -718,7 +787,10 @@ class TelegramOddsBot:
                     "HTML", False
                 ))
         else:
-            # Handle non-command messages (Text or Screenshot/Photo proof submissions)
+            # Handle non-command messages (State machine responses or Screenshot/Photo proof submissions)
+            if user_id in USER_STATES and USER_STATES[user_id].get("state") in ["AWAITING_TARGET", "AWAITING_STAKE"]:
+                asyncio.create_task(self._handle_state_input_async(chat_id, user_id, text))
+                return
             if not is_admin:
                 asyncio.create_task(self._handle_user_proof_submission(chat_id, user_id, from_user, text, photo, caption))
 
@@ -1044,7 +1116,7 @@ class TelegramOddsBot:
         )
         self.client.send_message(chat_id, help_text)
 
-    async def _cmd_matches_async(self, chat_id: str | int):
+    async def _cmd_matches_async(self, chat_id: str | int, user_id: Optional[int] = None):
         try:
             raw_matches = await global_exchange_scraper.fetch_live_matches_async()
             last_status = getattr(global_exchange_scraper, "last_fetch_status", 200)
@@ -1075,47 +1147,217 @@ class TelegramOddsBot:
             await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
             return
 
-        lines = ["🏏 <b>LIVE CREX IN-PLAY MATCHES</b>\n"]
-        for m in matches:
+        uid = user_id if user_id is not None else (int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id)
+        USER_STATES[uid] = {
+            "state": "MATCH_SELECT",
+            "matches": matches
+        }
+
+        # Step 1: Render clean Inline Keyboard of matches
+        inline_keyboard = []
+        lines = ["🏏 <b>LIVE IN-PLAY CRICKET MATCHES</b>\n"]
+        for idx, m in enumerate(matches):
             home_team = m.get("home_team", "Team 1")
             away_team = m.get("away_team", "Team 2")
-            match_status = m.get("status", "In-Play")
-            odds_list = m.get("odds", [])
+            match_status = m.get("status", "Live")
 
-            # Extract home and away odds strictly preserving official fixture order
-            home_odd = next((o for o in odds_list if o.get("name") == home_team), odds_list[0] if len(odds_list) > 0 else None)
-            away_odd = next((o for o in odds_list if o.get("name") == away_team), odds_list[1] if len(odds_list) > 1 else None)
+            btn_text = f"🏏 {home_team} vs {away_team} - Live"
+            inline_keyboard.append([
+                {"text": btn_text, "callback_data": f"match:{idx}"}
+            ])
 
-            if not home_odd or not away_odd:
-                continue
+        reply_markup = {"inline_keyboard": inline_keyboard}
+        msg_text = (
+            "🏏 <b>LIVE IN-PLAY CRICKET MATCHES</b>\n\n"
+            "Tap any live match below to select a team and set target odd:"
+        )
+        await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
 
-            # Determine favorite based on lower decimal back odd
-            is_home_fav = home_odd.get("back", 99.0) <= away_odd.get("back", 99.0)
+    async def _handle_match_click_async(self, chat_id: str | int, user_id: int, match_idx: int, cb_id: str):
+        """Step 2: Present inline buttons for both competing teams along with live ground bhav."""
+        user_state = USER_STATES.get(user_id, {})
+        matches = user_state.get("matches", [])
 
-            home_fav_tag = " (Fav)" if is_home_fav else ""
-            away_fav_tag = " (Fav)" if not is_home_fav else ""
+        if not matches or match_idx < 0 or match_idx >= len(matches):
+            raw_matches = await global_exchange_scraper.fetch_live_matches_async()
+            matches = [m for m in raw_matches if m.get("home_team") and m.get("away_team")]
+            if user_id not in USER_STATES:
+                USER_STATES[user_id] = {}
+            USER_STATES[user_id]["matches"] = matches
 
-            home_ind = format_indian_odds(home_odd['back'], home_odd['lay'])
-            away_ind = format_indian_odds(away_odd['back'], away_odd['lay'])
+        if not matches or match_idx < 0 or match_idx >= len(matches):
+            await asyncio.to_thread(self.client.answer_callback_query, cb_id, text="⚠️ Match data expired. Send /matches again.", show_alert=True)
+            return
 
-            home_win = int(round((1.0 / max(1.01, home_odd['back'])) * 100))
-            away_win = int(round((1.0 / max(1.01, away_odd['back'])) * 100))
+        selected_match = matches[match_idx]
+        home_team = selected_match.get("home_team", "Team 1")
+        away_team = selected_match.get("away_team", "Team 2")
+        odds_list = selected_match.get("odds", [])
 
-            home_line = f"• {home_team}{home_fav_tag}: <b>{home_ind}</b> ({home_odd['back']:.2f} / {home_odd['lay']:.2f}) | {home_win}% Win"
-            away_line = f"• {away_team}{away_fav_tag}: <b>{away_ind}</b> ({away_odd['back']:.2f} / {away_odd['lay']:.2f}) | {away_win}% Win"
+        home_odd = next((o for o in odds_list if o.get("name") == home_team), odds_list[0] if len(odds_list) > 0 else None)
+        away_odd = next((o for o in odds_list if o.get("name") == away_team), odds_list[1] if len(odds_list) > 1 else None)
 
-            home_target = round(max(1.02, home_odd['back'] - 0.07), 2) if is_home_fav else round(max(1.10, home_odd['back'] * 0.53), 2)
-            away_target = round(max(1.02, away_odd['back'] - 0.07), 2) if not is_home_fav else round(max(1.10, away_odd['back'] * 0.53), 2)
+        home_back = home_odd.get("back", 1.85) if home_odd else 1.85
+        away_back = away_odd.get("back", 1.85) if away_odd else 1.85
 
-            lines.append(
-                f"🏏 <b>{home_team} vs {away_team}</b> ({match_status})\n"
-                f"{home_line}\n"
-                f"{away_line}\n\n"
-                f"👉 <code>/track {home_team} {home_target:.2f} 1000</code>\n"
-                f"👉 <code>/track {away_team} {away_target:.2f} 1000</code>"
+        home_bhav_str = format_indian_odds(home_back)
+        away_bhav_str = format_indian_odds(away_back)
+
+        USER_STATES[user_id]["selected_match"] = selected_match
+
+        inline_keyboard = [
+            [
+                {"text": f"🟢 {home_team} (Bhav: {home_bhav_str})", "callback_data": f"select_team:{match_idx}:0"}
+            ],
+            [
+                {"text": f"🔴 {away_team} (Bhav: {away_bhav_str})", "callback_data": f"select_team:{match_idx}:1"}
+            ]
+        ]
+
+        reply_markup = {"inline_keyboard": inline_keyboard}
+        msg_text = f"Select the team to monitor for <b>{home_team} vs {away_team}</b>:"
+
+        await asyncio.to_thread(self.client.answer_callback_query, cb_id)
+        await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
+
+    async def _handle_team_click_async(self, chat_id: str | int, user_id: int, match_idx: int, team_idx: int, cb_id: str):
+        """Step 3 Start: Prompt user for Target Odd upon team selection."""
+        user_state = USER_STATES.get(user_id, {})
+        matches = user_state.get("matches", [])
+
+        if not matches or match_idx < 0 or match_idx >= len(matches):
+            raw_matches = await global_exchange_scraper.fetch_live_matches_async()
+            matches = [m for m in raw_matches if m.get("home_team") and m.get("away_team")]
+
+        if not matches or match_idx < 0 or match_idx >= len(matches):
+            await asyncio.to_thread(self.client.answer_callback_query, cb_id, text="⚠️ Match data expired. Send /matches again.", show_alert=True)
+            return
+
+        selected_match = matches[match_idx]
+        home_team = selected_match.get("home_team", "Team 1")
+        away_team = selected_match.get("away_team", "Team 2")
+        odds_list = selected_match.get("odds", [])
+
+        home_odd = next((o for o in odds_list if o.get("name") == home_team), odds_list[0] if len(odds_list) > 0 else None)
+        away_odd = next((o for o in odds_list if o.get("name") == away_team), odds_list[1] if len(odds_list) > 1 else None)
+
+        if team_idx == 0:
+            chosen_team = home_team
+            chosen_odd_obj = home_odd
+            opp_team = away_team
+        else:
+            chosen_team = away_team
+            chosen_odd_obj = away_odd
+            opp_team = home_team
+
+        entry_back = chosen_odd_obj.get("back", 1.85) if chosen_odd_obj else 1.85
+        live_bhav_str = format_indian_odds(entry_back)
+
+        USER_STATES[user_id] = {
+            "state": "AWAITING_TARGET",
+            "selected_match": selected_match,
+            "chosen_team": chosen_team,
+            "opp_team": opp_team,
+            "entry_odd": entry_back,
+            "live_bhav_str": live_bhav_str
+        }
+
+        msg_text = (
+            f"Selected: <b>{chosen_team}</b> (Current Bhav: <b>{live_bhav_str}</b>)\n\n"
+            f"Reply with your target bhav/odd (e.g., 20 or 1.20):"
+        )
+
+        await asyncio.to_thread(self.client.answer_callback_query, cb_id)
+        await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False)
+
+    async def _handle_state_input_async(self, chat_id: str | int, user_id: int, text: str):
+        """Step 3 Continuation: Handle interactive Target & Stake text responses."""
+        state_data = USER_STATES.get(user_id)
+        if not state_data:
+            return
+
+        current_state = state_data.get("state")
+
+        if current_state == "AWAITING_TARGET":
+            target_odd = parse_target_odd_input(text)
+            if target_odd is None:
+                msg = "❌ Invalid target odd. Please enter a valid rate (e.g., <code>20</code> or <code>1.20</code>):"
+                await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
+                return
+
+            state_data["target_odd"] = target_odd
+            state_data["state"] = "AWAITING_STAKE"
+
+            msg_text = "Enter your stake amount for cashout/P&L calculation (e.g. 5000) or send '0' to skip:"
+            await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False)
+            return
+
+        elif current_state == "AWAITING_STAKE":
+            stake_val = parse_stake_input(text)
+            if stake_val is None:
+                msg = "❌ Invalid stake amount. Enter a numeric stake (e.g. <code>5000</code>) or <code>0</code>:"
+                await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
+                return
+
+            team_name = state_data.get("chosen_team", "Team")
+            target_odd = state_data.get("target_odd", 1.20)
+            entry_odd = state_data.get("entry_odd")
+            selected_match = state_data.get("selected_match", {})
+            opp_team = state_data.get("opp_team")
+            match_slug = selected_match.get("slug") or selected_match.get("id")
+
+            clean_team = global_exchange_scraper._clean_team_name(team_name)
+
+            track_entry = {
+                "chat_id": chat_id,
+                "team": clean_team,
+                "team_name": clean_team,
+                "target_team_clean": team_name.upper(),
+                "match_slug": match_slug,
+                "target": target_odd,
+                "target_odd": target_odd,
+                "entry": entry_odd,
+                "entry_odd": entry_odd,
+                "current_odd": entry_odd,
+                "last_seen_odd": entry_odd,
+                "opponent_team": opp_team,
+                "stake": stake_val,
+                "data_source": "⚡ Live Exchange Feed",
+                "start_time": time.time(),
+                "muted": False,
+                "status": "ACTIVE",
+                "operator": "<=",
+                "last_alert_time": 0.0,
+                "has_triggered": False,
+                "frozen_since": None
+            }
+            ACTIVE_TRACKS[chat_id] = track_entry
+            save_active_jobs(ACTIVE_TRACKS)
+
+            self.engine.add_track(
+                chat_id=chat_id,
+                match_url="exchange",
+                team_name=clean_team,
+                threshold=target_odd,
+                operator="<=",
+                poll_interval=2.5,
+                stake=stake_val,
+                entry_odd=entry_odd or 1.01
             )
 
-        await asyncio.to_thread(self.client.send_message, chat_id, "\n\n".join(lines), "HTML", False)
+            USER_STATES.pop(user_id, None)
+
+            msg_text = (
+                f"✅ Tracking active for <b>{team_name}</b> at target <b>{target_odd:.2f}</b> | Stake: ₹{stake_val:,.0f}."
+            )
+            await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False)
+
+            task_key = str(chat_id)
+            if task_key in self.tracking_tasks:
+                self.tracking_tasks[task_key].cancel()
+
+            self.tracking_tasks[task_key] = asyncio.create_task(self.run_monitor(chat_id))
+
 
     async def _cmd_track_async(self, chat_id: str | int, user_id: int, args: list):
         if not args:
