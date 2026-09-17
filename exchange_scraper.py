@@ -82,24 +82,33 @@ def convert_paresh_to_decimal(val: float) -> float:
     else:
         return round(1.0 + (val / 100.0), 2)
 
-def format_indian_odds(back_odd: float, lay_odd: Optional[float] = None) -> str:
+def format_indian_odds(back_odd: Optional[float], lay_odd: Optional[float] = None) -> str:
     """
-    Converts standard decimal odds (e.g. 1.53 Back / 1.54 Lay) to Indian Bookie / Exchange format (Paresh / Lagan / Paise).
-    Examples:
+    Converts standard decimal odds to Indian Bookie / Exchange format (Paresh / Lagan / Paise).
+    - If back_odd <= 2.00 (1-100 paise range):
+      1.12 Back / 1.14 Lay -> "12-14 paise"
       1.53 Back / 1.54 Lay -> "53-54 paise"
-      1.18 Back / 1.20 Lay -> "18-20 paise"
-      2.40 Back / 2.45 Lay -> "140-145 paise"
-      1.53 Back only -> "53 paise"
+      1.90 Back / 1.92 Lay -> "90-92 paise"
+      1.02 Back / 1.03 Lay -> "2-3 paise"
+    - If back_odd > 2.00 (Underdog decimal rate):
+      Quoted in standard decimal rate (e.g., "8.50 / 9.00 rate"),
+      NEVER multiplied into invalid 750-800+ paise numbers.
     """
-    if back_odd is None or back_odd <= 0:
+    if back_odd is None or not isinstance(back_odd, (int, float)) or back_odd <= 1.0:
         return ""
 
-    back_paise = int(round((back_odd - 1.0) * 100))
-    if lay_odd is not None and lay_odd > 0:
-        lay_paise = int(round((lay_odd - 1.0) * 100))
-        return f"{back_paise}-{lay_paise} paise"
+    if back_odd <= 2.00:
+        back_paise = int(round((back_odd - 1.0) * 100))
+        if lay_odd is not None and isinstance(lay_odd, (int, float)) and lay_odd > 1.0 and lay_odd <= 2.00:
+            lay_paise = int(round((lay_odd - 1.0) * 100))
+            return f"{back_paise}-{lay_paise} paise"
+        else:
+            return f"{back_paise} paise"
     else:
-        return f"{back_paise} paise"
+        if lay_odd is not None and isinstance(lay_odd, (int, float)) and lay_odd > 1.0:
+            return f"{back_odd:.2f} / {lay_odd:.2f} rate"
+        else:
+            return f"{back_odd:.2f} rate"
 
 class ExchangeScraperEngine:
     """
@@ -843,16 +852,17 @@ class ExchangeScraperEngine:
             else:
                 return asyncio.run(self.get_live_odds_data_for_team_async(team_name))
         except Exception as e:
-            logger.warning(f"Error in sync get_live_odds_data_for_team: {e}")
-            default_odd = self._get_override(team_name) or (8.50 if "zim" in team_name.lower() else 1.12)
+            logger.error(f"❌ Explicit CREX Scraper Error in get_live_odds_data_for_team for '{team_name}': {e}")
+            override = self._get_override(team_name)
             return {
                 "target_team": self._clean_team_name(team_name),
-                "target_odd": default_odd,
-                "target_lay": round(default_odd + 0.05, 2),
+                "target_odd": override,
+                "target_lay": round(override + 0.05, 2) if override else None,
                 "opponent_team": None,
                 "opponent_odd": None,
                 "opponent_lay": None,
-                "match_title": None
+                "match_title": None,
+                "error": str(e)
             }
 
     @staticmethod

@@ -1045,7 +1045,11 @@ class TelegramOddsBot:
         self.client.send_message(chat_id, help_text)
 
     async def _cmd_matches_async(self, chat_id: str | int):
-        raw_matches = await global_exchange_scraper.fetch_live_matches_async()
+        try:
+            raw_matches = await global_exchange_scraper.fetch_live_matches_async()
+        except Exception as e:
+            logger.error(f"❌ Explicit CREX Live Fetch Error in /matches: {e}")
+            raw_matches = []
 
         matches = []
         for m in raw_matches:
@@ -1058,6 +1062,7 @@ class TelegramOddsBot:
                 matches.append(m)
 
         if not matches:
+            logger.warning(f"❌ CREX Live Query Notice: /matches retrieved 0 live in-play matches (Raw count: {len(raw_matches)}).")
             msg = "🏏 Currently no live cricket matches are in-play on CREX. Please check back when a live game starts."
             await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
             return
