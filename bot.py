@@ -1282,10 +1282,12 @@ class TelegramOddsBot:
         away_odd = next((o for o in odds_list if o.get("name") == away_team), odds_list[1] if len(odds_list) > 1 else None)
 
         home_back = home_odd.get("back", 1.85) if home_odd else 1.85
+        home_lay = home_odd.get("lay") if home_odd else None
         away_back = away_odd.get("back", 1.85) if away_odd else 1.85
+        away_lay = away_odd.get("lay") if away_odd else None
 
-        home_bhav_str = format_indian_odds(home_back)
-        away_bhav_str = format_indian_odds(away_back)
+        home_bhav_str = home_odd.get("indian_odds") if (home_odd and home_odd.get("indian_odds")) else format_indian_odds(home_back, home_lay)
+        away_bhav_str = away_odd.get("indian_odds") if (away_odd and away_odd.get("indian_odds")) else format_indian_odds(away_back, away_lay)
 
         USER_STATES[user_id]["selected_match"] = selected_match
 

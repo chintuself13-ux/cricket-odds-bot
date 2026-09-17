@@ -233,6 +233,77 @@ class ExchangeScraperEngine:
                 await asyncio.sleep(delay)
         return None
 
+    def _extract_crex_json_rates(self, clean_html: str, team1: str, team2: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+        """
+        Direct CREX Match JSON State Rate Extractor:
+        Extracts b_rate (Back) and l_rate (Lay) directly from the active live market object in CREX match JSON state.
+        Handles integer ground paise (e.g. 1 -> 1.01, 85 -> 1.85, 90 -> 1.90), fractional decimal rates (0.01 -> 1.01),
+        and standard decimal rates (1.01, 1.85).
+        Returns (t1_back, t1_lay, t2_back, t2_lay).
+        """
+        t1_b, t1_l, t2_b, t2_l = None, None, None, None
+        if not clean_html:
+            return t1_b, t1_l, t2_b, t2_l
+
+        def parse_rate(val_raw: Any) -> Optional[float]:
+            if val_raw is None:
+                return None
+            val_str = str(val_raw).strip()
+            try:
+                val = float(val_str)
+                if val <= 0:
+                    return None
+                # Integer ground paise (< 100 and no decimal point): e.g. 1 -> 1.01, 85 -> 1.85, 90 -> 1.90
+                if val < 100 and "." not in val_str:
+                    return round(1.0 + (val / 100.0), 2)
+                # Standard decimal rate: e.g. 1.01, 1.85, 2.40
+                elif val >= 1.0:
+                    return round(val, 2)
+                # Fractional decimal < 1.0: e.g. 0.01 -> 1.01, 0.85 -> 1.85
+                elif val < 1.0:
+                    return round(1.0 + val, 2)
+            except (ValueError, TypeError):
+                pass
+            return None
+
+        # 1. Search for paired b_rate & l_rate or bRate & lRate in CREX JSON state
+        pairs = re.findall(
+            r'"(?:b_rate|bRate|b_odd|bPrice)"\s*:\s*"?(\d+(?:\.\d+)?)"?\s*,\s*"(?:l_rate|lRate|l_odd|lPrice)"\s*:\s*"?(\d+(?:\.\d+)?)"?',
+            clean_html,
+            re.IGNORECASE
+        )
+        if pairs:
+            b_val = parse_rate(pairs[0][0])
+            l_val = parse_rate(pairs[0][1])
+            if b_val and b_val > 1.0:
+                t1_b = b_val
+                t1_l = l_val or round(b_val + (0.01 if b_val < 2.0 else 0.50), 2)
+                if len(pairs) > 1:
+                    b2_val = parse_rate(pairs[1][0])
+                    l2_val = parse_rate(pairs[1][1])
+                    if b2_val and b2_val > 1.0:
+                        t2_b = b2_val
+                        t2_l = l2_val or round(b2_val + (0.01 if b2_val < 2.0 else 0.50), 2)
+
+        # 2. Standalone field search if pairs not matched
+        if not t1_b:
+            b_matches = re.findall(r'"(?:b_rate|bRate|b_odd|bPrice|bRate1)"\s*:\s*"?(\d+(?:\.\d+)?)"?', clean_html, re.IGNORECASE)
+            l_matches = re.findall(r'"(?:l_rate|lRate|l_odd|lPrice|lRate1)"\s*:\s*"?(\d+(?:\.\d+)?)"?', clean_html, re.IGNORECASE)
+            if b_matches:
+                b_val = parse_rate(b_matches[0])
+                l_val = parse_rate(l_matches[0]) if l_matches else None
+                if b_val and b_val > 1.0:
+                    t1_b = b_val
+                    t1_l = l_val or round(b_val + (0.01 if b_val < 2.0 else 0.50), 2)
+                    if len(b_matches) > 1:
+                        b2_val = parse_rate(b_matches[1])
+                        l2_val = parse_rate(l_matches[1]) if len(l_matches) > 1 else None
+                        if b2_val and b2_val > 1.0:
+                            t2_b = b2_val
+                            t2_l = l2_val or round(b2_val + (0.01 if b2_val < 2.0 else 0.50), 2)
+
+        return t1_b, t1_l, t2_b, t2_l
+
     def _extract_relative_dom_odds(self, clean_html: str, team1: str, team2: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
         """
         Team-Isolated Relative DOM Odds Extraction:
@@ -522,13 +593,18 @@ class ExchangeScraperEngine:
                     elif team2.lower() in header_str.lower() and "won" in header_str.lower():
                         winning_team = team2
 
-            # 2. Parse live R field (Paresh rate) and favorite team indicator from Crex live JSON state
+            # 2. Extract direct CREX live rates (b_rate / l_rate) directly from CREX match JSON state
+            crex_json_t1_b, crex_json_t1_l, crex_json_t2_b, crex_json_t2_l = self._extract_crex_json_rates(clean_html, team1, team2)
             r_match = re.search(r'"R"\s*:\s*"(\d+)\+(\d+)"', clean_html)
-
-            # Relative DOM odds extraction
             rel_t1_b, rel_t1_l, rel_t2_b, rel_t2_l = self._extract_relative_dom_odds(clean_html, team1, team2)
 
-            has_live_odds = bool((rel_t1_b and rel_t1_b > 1.0) or (rel_t2_b and rel_t2_b > 1.0) or r_match or t1_override or t2_override)
+            has_live_odds = bool(
+                (crex_json_t1_b and crex_json_t1_b > 1.0) or
+                (crex_json_t2_b and crex_json_t2_b > 1.0) or
+                (rel_t1_b and rel_t1_b > 1.0) or
+                (rel_t2_b and rel_t2_b > 1.0) or
+                r_match or t1_override or t2_override
+            )
 
             # STRICT FILTER: Preserve explicit completed state for finished matches, return None for temporary missing odds
             if is_finished:
@@ -562,26 +638,27 @@ class ExchangeScraperEngine:
                 else:
                     fav_team_num = 1
 
-            if rel_t1_b or rel_t2_b:
-                if rel_t1_b and rel_t2_b:
-                    t1_back = t1_override or rel_t1_b
-                    t1_lay = rel_t1_l or round(t1_back + (0.02 if t1_back < 2.0 else 0.50), 2)
-                    t2_back = t2_override or rel_t2_b
-                    t2_lay = rel_t2_l or round(t2_back + (0.02 if t2_back < 2.0 else 0.50), 2)
-                elif rel_t1_b:
-                    t1_back = t1_override or rel_t1_b
-                    t1_lay = rel_t1_l or round(t1_back + (0.02 if t1_back < 2.0 else 0.50), 2)
+            if crex_json_t1_b or crex_json_t2_b or rel_t1_b or rel_t2_b:
+                t1_back = t1_override or crex_json_t1_b or rel_t1_b
+                t1_lay = crex_json_t1_l or rel_t1_l or (round(t1_back + (0.01 if t1_back < 2.0 else 0.50), 2) if t1_back else None)
+                t2_back = t2_override or crex_json_t2_b or rel_t2_b
+                t2_lay = crex_json_t2_l or rel_t2_l or (round(t2_back + (0.02 if t2_back < 2.0 else 0.50), 2) if t2_back else None)
+
+                if not t2_back and t1_back and t1_lay:
                     p1 = 1.0 / max(1.01, t1_lay)
                     p2_back = max(0.02, 1.0 - p1 - 0.003)
                     t2_back = t2_override or round(1.0 / p2_back, 2)
                     t2_lay = round(t2_back + (0.02 if t2_back < 2.0 else 0.50), 2)
-                else:
-                    t2_back = t2_override or rel_t2_b
-                    t2_lay = rel_t2_l or round(t2_back + (0.02 if t2_back < 2.0 else 0.50), 2)
+                elif not t1_back and t2_back and t2_lay:
                     p2 = 1.0 / max(1.01, t2_lay)
                     p1_back = max(0.02, 1.0 - p2 - 0.003)
                     t1_back = t1_override or round(1.0 / p1_back, 2)
-                    t1_lay = round(t1_back + (0.02 if t1_back < 2.0 else 0.50), 2)
+                    t1_lay = round(t1_back + (0.01 if t1_back < 2.0 else 0.50), 2)
+                
+                t1_back = t1_back or 1.85
+                t1_lay = t1_lay or round(t1_back + 0.02, 2)
+                t2_back = t2_back or 1.85
+                t2_lay = t2_lay or round(t2_back + 0.02, 2)
             elif r_match:
                 p_back = float(r_match.group(1))
                 offset = float(r_match.group(2))
