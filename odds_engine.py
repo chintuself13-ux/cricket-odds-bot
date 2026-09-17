@@ -321,7 +321,7 @@ class MultiTrackOddsEngine:
             if job.entry_odd is None and live_odd is not None:
                 job.entry_odd = live_odd
 
-            print(f"[LIVE TICK] Tracked: {job.team_name} | Current: {live_odd} | Target: {job.threshold}", flush=True)
+            print(f"[TRACKING ACTIVE] {job.team_name}: Current={live_odd} | Target={job.threshold}", flush=True)
 
             if live_odd is not None:
                 job.last_odd = live_odd
@@ -330,7 +330,7 @@ class MultiTrackOddsEngine:
                     self.on_odds_update(job, live_odd)
 
                 triggered = False
-                if job.operator == "<=" and live_odd <= job.threshold:
+                if job.operator == "<=" and live_odd <= float(job.threshold):
                     triggered = True
                 elif job.operator == ">=" and live_odd >= job.threshold:
                     triggered = True

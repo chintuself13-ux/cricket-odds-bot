@@ -1701,9 +1701,9 @@ class TelegramOddsBot:
                 target_val = track.get("target", track.get("target_odd", 0.0))
                 target_display = (track.get("target_team_clean") or team_name).upper()
 
-                print(f"[LIVE TICK] Tracked: {target_display} | Current: {curr} | Target: {target_val}", flush=True)
+                print(f"[TRACKING ACTIVE] {target_display}: Current={curr} | Target={target_val}", flush=True)
 
-                if curr is not None and isinstance(curr, (int, float)) and curr > 1.01 and curr <= target_val:
+                if curr is not None and isinstance(curr, (int, float)) and curr > 1.01 and curr <= float(target_val):
                     track["status"] = "TRIGGERED"
                     track["has_triggered"] = True
                     now = time.time()
