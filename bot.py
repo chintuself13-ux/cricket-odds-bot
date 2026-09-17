@@ -1172,7 +1172,7 @@ class TelegramOddsBot:
             matches.append(m)
 
         if not matches:
-            msg = "🏏 No active live matches found at the moment."
+            msg = "⚠️ No live in-play cricket matches on the exchange right now."
             await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
             return
 
