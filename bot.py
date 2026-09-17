@@ -1071,10 +1071,7 @@ class TelegramOddsBot:
                     "Please copy the match link directly from CREX and use <code>/seturl &lt;match_link&gt;</code> to track live ball-to-ball rates."
                 )
             else:
-                msg = (
-                    "🏏 <b>CREX Live Feed Notice:</b> Currently no active live cricket matches are in-play on CREX.\n\n"
-                    "💡 If a match is running, please copy the match link directly from CREX and use <code>/seturl &lt;match_link&gt;</code> to track live ball-to-ball rates."
-                )
+                msg = "🏏 No live in-play matches on CREX right now."
             await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
             return
 

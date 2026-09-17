@@ -469,9 +469,9 @@ class ExchangeScraperEngine:
             if title_m and any(kw in title_m.group(1).lower() for kw in ["won by", "concluded", "abandoned", "no result"]):
                 header_str += " " + title_m.group(1)
 
-            # Strict finished match completion patterns restricted exclusively to match header/scoreboard container
-            strict_finished_pattern = r'\b(won by|concluded|abandoned|no result|match ended|match finished|match tied)\b'
-            if re.search(strict_finished_pattern, header_str, re.IGNORECASE):
+            # Non-live / finished match status detection
+            non_live_pattern = r'\b(won by|concluded|abandoned|no result|match ended|match finished|match tied|completed|result|upcoming|scheduled|postponed|cancelled)\b'
+            if re.search(non_live_pattern, header_str, re.IGNORECASE):
                 is_finished = True
                 status_text = header_str.strip()
 
@@ -493,10 +493,13 @@ class ExchangeScraperEngine:
             # Relative DOM odds extraction
             rel_t1_b, rel_t1_l, rel_t2_b, rel_t2_l = self._extract_relative_dom_odds(clean_html, team1, team2)
 
-            # GUARD ACTIVE ODDS: If live R field or relative odds exist, match is definitely LIVE!
-            if r_match or rel_t1_b or rel_t2_b:
-                is_finished = False
-                status_text = "In-Play"
+            has_live_odds = bool((rel_t1_b and rel_t1_b > 1.0) or (rel_t2_b and rel_t2_b > 1.0) or r_match or t1_override or t2_override)
+
+            # STRICT FILTER: Drop match immediately if finished, upcoming, abandoned, or missing live odds!
+            if is_finished or not has_live_odds:
+                return None
+
+            status_text = "In-Play"
             
             # Detect favorite team from Crex JSON state
             fav_team_num = 1
@@ -555,33 +558,7 @@ class ExchangeScraperEngine:
                     t2_back = t2_override or dog_back
                     t2_lay = round(t2_back + 0.50, 2)
             else:
-                fav_back, fav_lay = None, None
-                if not t1_override and not t2_override:
-                    if is_finished:
-                        return {
-                            "id": slug,
-                            "match_id": slug,
-                            "match_slug": slug,
-                            "title": f"{team1} vs {team2}",
-                            "sport": "Crex Live Score",
-                            "status": status_text,
-                            "is_finished": True,
-                            "winner": winning_team,
-                            "crex_url": full_url,
-                            "home_team": team1,
-                            "away_team": team2,
-                            "odds": [],
-                            "favorite": None,
-                            "underdog": None,
-                            "recommendations": {}
-                        }
-                    return None
-                fav_back = t1_override or t2_override or 1.12
-                fav_lay = round(fav_back + 0.01, 2)
-                t1_back = t1_override or fav_back
-                t1_lay = fav_lay
-                t2_back = t2_override or round(fav_back + 0.50, 2)
-                t2_lay = round(t2_back + 0.50, 2)
+                return None
 
             odds_arr = [
                 {
