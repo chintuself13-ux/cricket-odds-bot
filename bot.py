@@ -14,6 +14,13 @@ from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List, Tuple
 
+try:
+    import pymongo
+    HAS_PYMONGO = True
+except ImportError:
+    pymongo = None
+    HAS_PYMONGO = False
+
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
 from exchange_scraper import global_exchange_scraper, format_indian_odds, set_base_url, BASE_URL
 
@@ -213,6 +220,36 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8903237867:AAFkZV59PF6_9ChXh7S
 
 DEFAULT_ADMIN_ID = 7592394328
 ALLOWED_USERS_FILE = "allowed_users.json"
+ACTIVE_JOBS_FILE = "active_jobs.json"
+
+MONGO_URI = os.environ.get("MONGO_URI", "").strip()
+
+_mongo_db_instance = None
+_mongo_init_attempted = False
+
+
+def get_mongo_db():
+    global _mongo_db_instance, _mongo_init_attempted
+    if not HAS_PYMONGO or not MONGO_URI:
+        return None
+    if _mongo_db_instance is not None:
+        return _mongo_db_instance
+
+    try:
+        client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=4000)
+        client.admin.command('ping')
+        try:
+            db = client.get_default_database(default="track_odds_db")
+        except Exception:
+            db = client["track_odds_db"]
+        _mongo_db_instance = db
+        logger.info("Successfully connected to MongoDB storage!")
+        return db
+    except Exception as e:
+        if not _mongo_init_attempted:
+            logger.warning(f"MongoDB connection notice ({e}). Using local JSON fallback.")
+            _mongo_init_attempted = True
+        return None
 
 
 def load_allowed_users() -> Dict[int, Optional[datetime]]:
@@ -224,7 +261,38 @@ def load_allowed_users() -> Dict[int, Optional[datetime]]:
         except ValueError:
             pass
 
-    if os.path.exists(ALLOWED_USERS_FILE):
+    db = get_mongo_db()
+    loaded_from_mongo = False
+
+    if db is not None:
+        try:
+            users_coll = db["users"]
+            docs = list(users_coll.find({}))
+            for doc in docs:
+                uid_raw = doc.get("_id") or doc.get("user_id")
+                if uid_raw is None:
+                    continue
+                try:
+                    uid = int(uid_raw)
+                    exp_val = doc.get("expiry")
+                    if exp_val is None:
+                        allowed[uid] = None
+                    else:
+                        if isinstance(exp_val, datetime):
+                            dt = exp_val
+                        else:
+                            dt = datetime.fromisoformat(str(exp_val))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        allowed[uid] = dt
+                except Exception as ex:
+                    logger.warning(f"Error parsing user doc from Mongo ({doc}): {ex}")
+            loaded_from_mongo = True
+            logger.info(f"Loaded {len(allowed)} authorized users from MongoDB collection 'users'.")
+        except Exception as e:
+            logger.warning(f"Failed to fetch users from MongoDB: {e}. Falling back to local JSON.")
+
+    if not loaded_from_mongo and os.path.exists(ALLOWED_USERS_FILE):
         try:
             with open(ALLOWED_USERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -244,6 +312,7 @@ def load_allowed_users() -> Dict[int, Optional[datetime]]:
                 elif isinstance(data, list):
                     for u in data:
                         allowed[int(u)] = None
+            logger.info(f"Loaded {len(allowed)} authorized users from local file '{ALLOWED_USERS_FILE}'.")
         except Exception as e:
             logger.warning(f"Could not load allowed_users.json: {e}")
 
@@ -263,13 +332,52 @@ def save_allowed_users(allowed: Dict[int, Optional[datetime]]):
         logger.warning(f"Could not save allowed_users.json: {e}")
 
 
-ALLOWED_USERS: Dict[int, Optional[datetime]] = load_allowed_users()
+def persist_user_allow(user_id: int, expiry: Optional[datetime]):
+    """Persists granted access for user_id to MongoDB (if available) and local JSON fallback."""
+    user_id = int(user_id)
+    ALLOWED_USERS[user_id] = expiry
 
-ACTIVE_JOBS_FILE = "active_jobs.json"
+    db = get_mongo_db()
+    if db is not None:
+        try:
+            users_coll = db["users"]
+            doc = {
+                "_id": user_id,
+                "user_id": user_id,
+                "expiry": expiry.isoformat() if expiry else None,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            users_coll.replace_one({"_id": user_id}, doc, upsert=True)
+            logger.info(f"Persisted user {user_id} allow state to MongoDB.")
+        except Exception as e:
+            logger.warning(f"Failed to persist user {user_id} allow to MongoDB: {e}")
+
+    save_allowed_users(ALLOWED_USERS)
+
+
+def persist_user_revoke(user_id: int):
+    """Persists revoked access for user_id to MongoDB (if available) and local JSON fallback."""
+    user_id = int(user_id)
+    if user_id in ALLOWED_USERS:
+        del ALLOWED_USERS[user_id]
+
+    db = get_mongo_db()
+    if db is not None:
+        try:
+            users_coll = db["users"]
+            users_coll.delete_one({"_id": user_id})
+            logger.info(f"Persisted user {user_id} revoke state to MongoDB.")
+        except Exception as e:
+            logger.warning(f"Failed to persist user {user_id} revoke to MongoDB: {e}")
+
+    save_allowed_users(ALLOWED_USERS)
+
+
+ALLOWED_USERS: Dict[int, Optional[datetime]] = load_allowed_users()
 
 
 def save_active_jobs(active_tracks: Dict[Any, Dict[str, Any]]):
-    """Saves ACTIVE_TRACKS dictionary to active_jobs.json for restart persistence."""
+    """Saves ACTIVE_TRACKS dictionary to MongoDB collection 'active_jobs' and active_jobs.json."""
     try:
         data = {}
         for key, track in active_tracks.items():
@@ -279,6 +387,18 @@ def save_active_jobs(active_tracks: Dict[Any, Dict[str, Any]]):
                     clean_item[k] = v
             data[str(key)] = clean_item
 
+        db = get_mongo_db()
+        if db is not None:
+            try:
+                jobs_coll = db["active_jobs"]
+                jobs_coll.delete_many({})
+                if data:
+                    docs = [{"_id": str(k), **v} for k, v in data.items()]
+                    jobs_coll.insert_many(docs)
+                logger.info(f"Saved {len(data)} active tracking jobs to MongoDB collection 'active_jobs'")
+            except Exception as e:
+                logger.warning(f"Failed to save active jobs to MongoDB: {e}")
+
         with open(ACTIVE_JOBS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
@@ -286,7 +406,29 @@ def save_active_jobs(active_tracks: Dict[Any, Dict[str, Any]]):
 
 
 def load_active_jobs() -> Dict[Any, Dict[str, Any]]:
-    """Loads saved tracking jobs from active_jobs.json on startup."""
+    """Loads saved tracking jobs from MongoDB or active_jobs.json on startup."""
+    db = get_mongo_db()
+    if db is not None:
+        try:
+            jobs_coll = db["active_jobs"]
+            docs = list(jobs_coll.find({}))
+            if docs:
+                loaded_tracks = {}
+                for doc in docs:
+                    key_str = doc.get("_id")
+                    try:
+                        key = int(key_str)
+                    except (ValueError, TypeError):
+                        key = key_str
+                    doc_copy = dict(doc)
+                    doc_copy.pop("_id", None)
+                    doc_copy["chat_id"] = key
+                    loaded_tracks[key] = doc_copy
+                logger.info(f"Loaded {len(loaded_tracks)} active tracking sessions from MongoDB collection 'active_jobs'")
+                return loaded_tracks
+        except Exception as e:
+            logger.warning(f"Failed to load active jobs from MongoDB: {e}. Falling back to local JSON.")
+
     target_file = ACTIVE_JOBS_FILE if os.path.exists(ACTIVE_JOBS_FILE) else ("active_job.json" if os.path.exists("active_job.json") else None)
     if not target_file:
         return {}
@@ -361,8 +503,7 @@ class TelegramOddsBot:
 
         now = datetime.now(timezone.utc)
         if now > expiry:
-            del ALLOWED_USERS[user_id]
-            save_allowed_users(ALLOWED_USERS)
+            persist_user_revoke(user_id)
             logger.info(f"User {user_id} access expired and blocked.")
             return False, True
 
@@ -691,8 +832,7 @@ class TelegramOddsBot:
                 return
 
             expiry_dt = datetime.now(timezone.utc) + delta
-            ALLOWED_USERS[target_user_id] = expiry_dt
-            save_allowed_users(ALLOWED_USERS)
+            persist_user_allow(target_user_id, expiry_dt)
 
             expiry_str = expiry_dt.strftime("%Y-%m-%d %H:%M UTC")
             admin_msg = f"✅ User <code>{target_user_id}</code> granted access for <b>{duration_str}</b>!\n📅 Expiry: <code>{expiry_str}</code>"
@@ -720,8 +860,7 @@ class TelegramOddsBot:
                 return
 
             if target_user_id in ALLOWED_USERS:
-                del ALLOWED_USERS[target_user_id]
-                save_allowed_users(ALLOWED_USERS)
+                persist_user_revoke(target_user_id)
                 admin_msg = f"✅ Access for user <code>{target_user_id}</code> has been revoked."
             else:
                 admin_msg = f"ℹ️ User <code>{target_user_id}</code> was not in allowed list."
