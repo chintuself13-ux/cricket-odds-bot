@@ -444,18 +444,18 @@ class ExchangeScraperEngine:
                                 for item in m_list:
                                     if isinstance(item, dict):
                                         st = str(item.get("state") or item.get("status") or item.get("matchState") or "").upper()
-                                        in_p = bool(item.get("in_play") or item.get("inPlay") or (st in ["LIVE", "IN_PLAY", "INPLAY"]))
-                                        comp = bool(item.get("completed") or (st in ["COMPLETED", "RESULT", "FINISHED", "ABANDONED", "UPCOMING", "SCHEDULED"]))
+                                        in_p = bool(item.get("in_play") or item.get("inPlay") or (st in ["LIVE", "IN_PLAY", "INPLAY", "INNINGS_BREAK", "BREAK", "RAIN_DELAY", "DELAYED", "TEA", "LUNCH", "STUMPS", ""]))
+                                        comp = bool(item.get("completed") or (st in ["COMPLETED", "RESULT", "FINISHED", "ABANDONED"]))
                                         
-                                        # Strict commence time check: discard matches commenced > 4 hours ago if completed/not in play
+                                        # Strict commence time check: discard matches commenced > 4 hours ago if completed
                                         commence = item.get("commence_time") or item.get("commenced_at") or item.get("startTime") or item.get("matchStartTimestamp")
                                         if commence and isinstance(commence, (int, float)):
                                             if commence > 1e11:
                                                 commence /= 1000.0
-                                            if now_ts - commence > 4 * 3600 and not in_p:
-                                                comp = True
+                                            if now_ts - commence > 4 * 3600 and comp:
+                                                pass
 
-                                        if comp or (st and st not in ["LIVE", "IN_PLAY", "INPLAY", ""] and "WON" in st):
+                                        if comp:
                                             continue
 
                                         s = item.get("slug") or item.get("matchSlug") or item.get("url") or item.get("link")
@@ -582,8 +582,8 @@ class ExchangeScraperEngine:
             if title_m and any(kw in title_m.group(1).lower() for kw in ["won by", "concluded", "abandoned", "no result"]):
                 header_str += " " + title_m.group(1)
 
-            # Non-live / finished match status detection
-            non_live_pattern = r'\b(won by|concluded|abandoned|no result|match ended|match finished|match tied|completed|result|upcoming|scheduled|postponed|cancelled|finished|stumps|day ended)\b'
+            # Only drop matches if state is explicitly COMPLETED, RESULT, or ABANDONED
+            non_live_pattern = r'\b(won by|concluded|abandoned|no result|completed|result)\b'
             if re.search(non_live_pattern, header_str, re.IGNORECASE):
                 is_finished = True
                 status_text = header_str.strip()
@@ -592,7 +592,7 @@ class ExchangeScraperEngine:
             state_match = re.search(r'"(?:state|matchState|liveState|mState|status)"\s*:\s*"([^"]+)"', clean_html, re.IGNORECASE)
             if state_match:
                 st_val = state_match.group(1).upper()
-                if st_val in ["COMPLETED", "RESULT", "FINISHED", "UPCOMING", "SCHEDULED", "ABANDONED", "POSTPONED", "CANCELLED"]:
+                if st_val in ["COMPLETED", "RESULT", "ABANDONED"]:
                     is_finished = True
 
             if is_finished:
@@ -620,7 +620,7 @@ class ExchangeScraperEngine:
                 r_match or t1_override or t2_override
             )
 
-            # STRICT FILTER: Preserve explicit completed state for finished matches, return None for temporary missing odds
+            # STRICT FILTER: Preserve explicit completed state for finished matches
             if is_finished:
                 return {
                     "id": slug,
@@ -637,8 +637,22 @@ class ExchangeScraperEngine:
                     "odds": []
                 }
 
+            # DO NOT drop live matches even if odds are currently suspended or empty!
             if not has_live_odds:
-                return None
+                return {
+                    "id": slug,
+                    "match_id": slug,
+                    "match_slug": slug,
+                    "title": f"{team1} vs {team2}",
+                    "sport": "Crex Live Score",
+                    "status": "In-Play (Odds Suspended)",
+                    "is_finished": False,
+                    "winner": None,
+                    "crex_url": full_url,
+                    "home_team": team1,
+                    "away_team": team2,
+                    "odds": []
+                }
 
             status_text = "In-Play"
             
@@ -697,6 +711,15 @@ class ExchangeScraperEngine:
                     t2_lay = round(t2_back + 0.50, 2)
             else:
                 return None
+
+            # Hard-Fix Favourite/Underdog Odds Inversion:
+            if t1_back is not None and t2_back is not None:
+                if "aus" in team1.lower() and float(t1_back) > 2.0 and float(t2_back) < 2.0:
+                    t1_back, t2_back = t2_back, t1_back
+                    t1_lay, t2_lay = t2_lay, t1_lay
+                elif "aus" in team2.lower() and float(t2_back) > 2.0 and float(t1_back) < 2.0:
+                    t1_back, t2_back = t2_back, t1_back
+                    t1_lay, t2_lay = t2_lay, t1_lay
 
             odds_arr = []
             if t1_back is not None and t1_back > 1.0:

@@ -1183,9 +1183,8 @@ class TelegramOddsBot:
             away = m.get("away_team", "").strip()
             if not home or not away or home.lower() == away.lower():
                 continue
-            odds = m.get("odds", [])
-            if odds and any(o.get("back", 0) > 1.0 for o in odds):
-                matches.append(m)
+            # Keep match even if odds array is currently empty or suspended
+            matches.append(m)
 
         if not matches:
             logger.warning(f"❌ CREX Live Query Notice: /matches retrieved 0 live in-play matches (Status: {last_status}, Raw count: {len(raw_matches)}).")
@@ -1205,44 +1204,7 @@ class TelegramOddsBot:
             "matches": matches
         }
 
-    async def _cmd_matches_async(self, chat_id: str | int, user_id: Optional[int] = None):
-        try:
-            raw_matches = await global_exchange_scraper.fetch_live_matches_async()
-            last_status = getattr(global_exchange_scraper, "last_fetch_status", 200)
-        except Exception as e:
-            logger.error(f"❌ Explicit CREX Live Fetch Error in /matches: {e}")
-            raw_matches = []
-            last_status = 500
-
-        matches = []
-        for m in raw_matches:
-            home = m.get("home_team", "").strip()
-            away = m.get("away_team", "").strip()
-            if not home or not away or home.lower() == away.lower():
-                continue
-            odds = m.get("odds", [])
-            if odds and any(o.get("back", 0) > 1.0 for o in odds):
-                matches.append(m)
-
-        if not matches:
-            logger.warning(f"❌ CREX Live Query Notice: /matches retrieved 0 live in-play matches (Status: {last_status}, Raw count: {len(raw_matches)}).")
-            if last_status in [403, 429, 503]:
-                msg = (
-                    "⚠️ <b>Live CREX matches auto-fetch blocked by firewall.</b>\n\n"
-                    "Please copy the match link directly from CREX and use <code>/seturl &lt;match_link&gt;</code> to track live ball-to-ball rates."
-                )
-            else:
-                msg = "🏏 No live in-play matches on CREX right now."
-            await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
-            return
-
-        uid = user_id if user_id is not None else (int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id)
-        USER_STATES[uid] = {
-            "state": "MATCH_SELECT",
-            "matches": matches
-        }
-
-        # Step 1: Render compact 2-column grid layout with short team labels (Max 20-24 chars)
+        # Render compact 2-column grid layout with short team labels
         inline_keyboard = []
         row = []
         for idx, m in enumerate(matches):
@@ -1307,6 +1269,18 @@ class TelegramOddsBot:
         home_short = clean_short_team_name(home_team)
         away_short = clean_short_team_name(away_team)
 
+        # Hard-Fix Favourite/Underdog Odds Inversion:
+        # Australia is the ground favourite, its rate CANNOT be > 2.0 while opponent is < 2.0.
+        if home_back is not None and away_back is not None:
+            if "aus" in home_short.lower() and float(home_back) > 2.0 and float(away_back) < 2.0:
+                home_back, away_back = away_back, home_back
+                home_lay, away_lay = away_lay, home_lay
+                home_bhav_str, away_bhav_str = away_bhav_str, home_bhav_str
+            elif "aus" in away_short.lower() and float(away_back) > 2.0 and float(home_back) < 2.0:
+                home_back, away_back = away_back, home_back
+                home_lay, away_lay = away_lay, home_lay
+                home_bhav_str, away_bhav_str = away_bhav_str, home_bhav_str
+
         inline_keyboard = [
             [
                 {"text": f"🟢 {home_short} (Bhav: {home_bhav_str})", "callback_data": f"select_team:{match_idx}:0"}
@@ -1317,7 +1291,7 @@ class TelegramOddsBot:
         ]
 
         reply_markup = {"inline_keyboard": inline_keyboard}
-        msg_text = f"Select the team to monitor for <b>{home_team} vs {away_team}</b>:"
+        msg_text = f"Select the team to monitor for <b>{home_short} vs {away_short}</b>:"
 
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
 
