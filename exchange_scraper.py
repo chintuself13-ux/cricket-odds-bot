@@ -414,28 +414,64 @@ class ExchangeScraperEngine:
 
     async def fetch_live_exchange_matches(self) -> List[Dict[str, Any]]:
         """
-        Fetches live in-play cricket matches from catalog & exchange feeds.
-        Primary Listing Endpoint: https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates
-        Live Odds Stream: https://odd.ocric99.com/ws/getMarketDataNew
+        Fetches live in-play cricket matches from Reddybook / 11xplay catalog feed via POST payload.
+        Endpoint: https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates
+        Payload: {"operatorId": "11xplay"}
         """
         self.start_websocket_listener_task()
 
         raw_data = []
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": f"{CURRENT_EXCHANGE_URL}/",
-            "Origin": CURRENT_EXCHANGE_URL,
-            "Accept": "application/json, text/plain, */*"
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/json",
+            "origin": CURRENT_EXCHANGE_URL if CURRENT_EXCHANGE_URL else "https://reddybook.info",
+            "referer": f"{CURRENT_EXCHANGE_URL.rstrip('/')}/" if CURRENT_EXCHANGE_URL else "https://reddybook.info/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
         }
 
+        payload = {"operatorId": "11xplay"}
         session = await self.get_aiohttp_session()
 
-        # 1. Primary Match Listing Endpoint: CURRENT_CATALOG_URL
+        # 1. Primary Reddybook / 11xplay POST Catalog Endpoint
         if CURRENT_CATALOG_URL:
             try:
-                async with session.get(CURRENT_CATALOG_URL, headers=headers, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+                async with session.post(
+                    CURRENT_CATALOG_URL,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=6.0)
+                ) as resp:
                     self.last_fetch_status = resp.status
+                    if resp.status == 200:
+                        try:
+                            data = await resp.json(content_type=None)
+                            if isinstance(data, list) and data:
+                                raw_data = data
+                            elif isinstance(data, dict):
+                                m_list = (
+                                    data.get("matches") or data.get("data") or
+                                    data.get("result") or data.get("items") or
+                                    data.get("events") or data.get("rates") or
+                                    data.get("gmarket") or []
+                                )
+                                if isinstance(m_list, list) and m_list:
+                                    raw_data = m_list
+                                elif "runners" in data:
+                                    raw_data = [data]
+                        except Exception as parse_ex:
+                            logger.debug(f"Catalog POST JSON parse notice ({CURRENT_CATALOG_URL}): {parse_ex}")
+            except Exception as e:
+                logger.debug(f"Catalog POST fetch notice ({CURRENT_CATALOG_URL}): {e}")
+
+        # 2. If catalog POST data is empty, try GET catalog fallback
+        if not raw_data and CURRENT_CATALOG_URL:
+            try:
+                async with session.get(
+                    CURRENT_CATALOG_URL,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=4.0)
+                ) as resp:
                     if resp.status == 200:
                         try:
                             data = await resp.json(content_type=None)
@@ -449,73 +485,41 @@ class ExchangeScraperEngine:
                                 )
                                 if isinstance(m_list, list) and m_list:
                                     raw_data = m_list
-                                elif "runners" in data:
-                                    raw_data = [data]
-                        except Exception as parse_ex:
-                            logger.debug(f"Catalog JSON parse notice ({CURRENT_CATALOG_URL}): {parse_ex}")
+                        except Exception:
+                            pass
             except Exception as e:
-                logger.debug(f"Catalog fetch notice ({CURRENT_CATALOG_URL}): {e}")
+                logger.debug(f"Catalog GET fallback notice ({CURRENT_CATALOG_URL}): {e}")
 
-        # 2. If catalog data is empty, check MARKET_CACHE
+        # 3. If still empty, check MARKET_CACHE
         if not raw_data:
             async with MARKET_CACHE_LOCK:
                 if MARKET_CACHE:
                     raw_data = list(MARKET_CACHE.values())
 
-        # 3. Fallback REST HTTP endpoints on CURRENT_EXCHANGE_URL if still empty
-        if not raw_data:
-            routes = [
-                f"{CURRENT_EXCHANGE_URL}/api/v1/inplay-matches",
-                f"{CURRENT_EXCHANGE_URL}/api/v1/getCricketMatches",
-                f"{CURRENT_EXCHANGE_URL}/api/v1/listMarketBook"
-            ]
-
-            for ep in routes:
-                try:
-                    async with session.get(ep, headers=headers, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
-                        self.last_fetch_status = resp.status
-                        if resp.status == 200:
-                            try:
-                                data = await resp.json(content_type=None)
-                                if isinstance(data, list) and data:
-                                    raw_data = data
-                                    break
-                                elif isinstance(data, dict):
-                                    m_list = (
-                                        data.get("matches") or data.get("data") or
-                                        data.get("result") or data.get("items") or
-                                        data.get("gmarket") or []
-                                    )
-                                    if isinstance(m_list, list) and m_list:
-                                        raw_data = m_list
-                                        break
-                                    elif "runners" in data:
-                                        raw_data = [data]
-                                        break
-                            except Exception:
-                                pass
-                except Exception as e:
-                    logger.debug(f"Exchange GET route notice ({ep}): {e}")
-
-                if raw_data:
-                    break
-
+        # 4. Filter and Parse Matches
         matches = []
         if isinstance(raw_data, list):
             for item in raw_data:
-                m_parsed = self._parse_exchange_match(item)
-                if m_parsed:
-                    # Enrich with real-time odds from MARKET_CACHE if available
-                    m_id = m_parsed.get("id") or m_parsed.get("match_id")
-                    if m_id:
-                        async with MARKET_CACHE_LOCK:
-                            cached_item = MARKET_CACHE.get(str(m_id))
-                            if cached_item:
-                                enriched = self._parse_exchange_match(cached_item)
-                                if enriched and enriched.get("odds"):
-                                    m_parsed["odds"] = enriched["odds"]
+                if isinstance(item, dict):
+                    # Filter for cricket (sports_id == 4 or '4' or sport/sport_name containing 'cricket' if field is present)
+                    s_id = str(item.get("sports_id") or item.get("sportsId") or item.get("sport_id") or item.get("sportId") or "")
+                    s_name = str(item.get("sport") or item.get("sport_name") or item.get("sportName") or "").lower()
+                    if s_id and s_id not in ["4", "0", ""] and "cricket" not in s_name:
+                        continue
 
-                    matches.append(m_parsed)
+                    m_parsed = self._parse_exchange_match(item)
+                    if m_parsed:
+                        # Enrich with real-time odds from MARKET_CACHE if available
+                        m_id = m_parsed.get("id") or m_parsed.get("match_id")
+                        if m_id:
+                            async with MARKET_CACHE_LOCK:
+                                cached_item = MARKET_CACHE.get(str(m_id))
+                                if cached_item:
+                                    enriched = self._parse_exchange_match(cached_item)
+                                    if enriched and enriched.get("odds"):
+                                        m_parsed["odds"] = enriched["odds"]
+
+                        matches.append(m_parsed)
 
         return matches
 
