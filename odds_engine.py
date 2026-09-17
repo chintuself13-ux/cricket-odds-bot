@@ -71,8 +71,7 @@ def send_telegram_alert(
 
 class OddsDataEngine:
     """
-    Permanent default real-time engine using Crex Live Scraper (exchange_scraper.py).
-    Fetches real-time ball-by-ball rates directly with zero request quotas or API key limits.
+    Default real-time odds engine using The Odds API & Exchange Engine (exchange_scraper.py).
     """
     def __init__(self, api_keys_str: str = ""):
         self.api_keys = []

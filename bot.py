@@ -1159,11 +1159,9 @@ class TelegramOddsBot:
     async def _cmd_matches_async(self, chat_id: str | int, user_id: Optional[int] = None):
         try:
             raw_matches = await global_exchange_scraper.fetch_live_matches_async()
-            last_status = getattr(global_exchange_scraper, "last_fetch_status", 200)
         except Exception as e:
-            logger.error(f"❌ Explicit CREX Live Fetch Error in /matches: {e}")
+            logger.error(f"❌ Live Fetch Error in /matches: {e}")
             raw_matches = []
-            last_status = 500
 
         matches = []
         for m in raw_matches:
@@ -1171,18 +1169,10 @@ class TelegramOddsBot:
             away = m.get("away_team", "").strip()
             if not home or not away or home.lower() == away.lower():
                 continue
-            # Keep match even if odds array is currently empty or suspended
             matches.append(m)
 
         if not matches:
-            logger.warning(f"❌ CREX Live Query Notice: /matches retrieved 0 live in-play matches (Status: {last_status}, Raw count: {len(raw_matches)}).")
-            if last_status in [403, 429, 503]:
-                msg = (
-                    "⚠️ <b>Live CREX matches auto-fetch blocked by firewall.</b>\n\n"
-                    "Please copy the match link directly from CREX and use <code>/seturl &lt;match_link&gt;</code> to track live ball-to-ball rates."
-                )
-            else:
-                msg = "🏏 No live in-play matches on CREX right now."
+            msg = "🏏 No active live matches found at the moment."
             await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
             return
 
@@ -1214,7 +1204,7 @@ class TelegramOddsBot:
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
 
     async def _handle_match_click_async(self, chat_id: str | int, user_id: int, match_idx: int, cb_id: str):
-        """Step 2: Team selection buttons with fresh real-time CREX match re-scrape."""
+        """Step 2: Team selection buttons with fresh real-time live match re-scrape."""
         if cb_id:
             asyncio.create_task(asyncio.to_thread(self.client.answer_callback_query, cb_id))
 
@@ -1229,7 +1219,7 @@ class TelegramOddsBot:
         selected_match = matches[match_idx]
         match_slug = selected_match.get("slug") or selected_match.get("id") or selected_match.get("match_slug")
 
-        # Force fresh live CREX re-scrape on match selection
+        # Force fresh live re-scrape on match selection
         if match_slug:
             fresh_match = await global_exchange_scraper.scrape_single_match_by_slug_async(match_slug)
             if fresh_match:
@@ -1284,7 +1274,7 @@ class TelegramOddsBot:
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
 
     async def _handle_team_click_async(self, chat_id: str | int, user_id: int, match_idx: int, team_idx: int, cb_id: str):
-        """Step 3 Start: Target odd prompt with fresh real-time CREX rate lock."""
+        """Step 3 Start: Target odd prompt with fresh real-time market rate lock."""
         if cb_id:
             asyncio.create_task(asyncio.to_thread(self.client.answer_callback_query, cb_id))
         user_state = USER_STATES.get(user_id, {})
