@@ -23,10 +23,99 @@ CURRENT_CATALOG_URL = os.getenv("CATALOG_URL", DEFAULT_CATALOG_URL)
 DEFAULT_ODDS_URL = "https://odd.ocric99.com/ws/getMarketDataNew"
 CURRENT_ODDS_URL = os.getenv("ODDS_URL", DEFAULT_ODDS_URL)
 
+BLOCKED_KEYWORDS = [
+    "srl", "simulated", "virtual", "cyber", "e-cricket", 
+    "electronic", "table cricket", "t10", "simulated reality"
+]
+
 MARKET_CACHE: Dict[str, Dict[str, Any]] = {}
 MARKET_CACHE_LOCK = asyncio.Lock()
 WS_TASK: Optional[asyncio.Task] = None
 WS_URL = CURRENT_ODDS_URL.replace("https://", "wss://").replace("http://", "ws://")
+
+
+async def get_live_matches() -> List[Dict[str, Any]]:
+    """
+    Fetches live cricket matches directly from Cricbet99 event list feed with strict SRL/Virtual exclusion.
+    URL: https://api.cricbet99.click/api/guest/event_list
+    """
+    url = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://api.cricbet99.click/api/guest/event_list"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": CURRENT_EXCHANGE_URL if CURRENT_EXCHANGE_URL else "https://reddybook.info",
+        "Referer": f"{CURRENT_EXCHANGE_URL.rstrip('/')}/" if CURRENT_EXCHANGE_URL else "https://reddybook.info/"
+    }
+
+    try:
+        session = await global_exchange_scraper.get_aiohttp_session()
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
+            if resp.status != 200:
+                logger.error(f"[SCRAPER] Cricbet API returned HTTP status {resp.status}")
+                return []
+            payload = await resp.json(content_type=None)
+    except Exception as e:
+        logger.error(f"[SCRAPER] Cricbet request failed with exception: {e}")
+        return []
+
+    events = payload.get("data", {}).get("events", []) if isinstance(payload, dict) else []
+    if not events and isinstance(payload, dict):
+        events = payload.get("events") or payload.get("data") or payload.get("result") or []
+    if not isinstance(events, list):
+        events = []
+
+    logger.info(f"[SCRAPER] Total events in response: {len(events)}")
+
+    real_matches = []
+    seen_ids = set()
+
+    for item in events:
+        if not isinstance(item, dict):
+            continue
+
+        # Verify Sport: 4 = Cricket
+        event_type = str(item.get("event_type_id") or item.get("sports_id") or item.get("sport_id") or "").strip()
+        if event_type and event_type != "4":
+            continue
+
+        name = item.get("name") or item.get("event_name") or item.get("title") or ""
+        name = name.strip()
+        competition = str(item.get("competition_name") or item.get("competition") or item.get("league") or "").strip().lower()
+        lower_name = name.lower()
+
+        # Must be a fixture between two teams
+        if not (" v " in lower_name or " vs " in lower_name):
+            continue
+
+        # Strictly exclude SRL / Virtual / Simulated games
+        if any(bad in lower_name for bad in BLOCKED_KEYWORDS) or any(bad in competition for bad in BLOCKED_KEYWORDS):
+            continue
+
+        # Extract unique identifier
+        m_id = str(item.get("market_id") or item.get("event_id") or item.get("id") or "").strip()
+        if not m_id or m_id in seen_ids:
+            continue
+
+        seen_ids.add(m_id)
+
+        parts = re.split(r'\s+(?:vs|v|-)\s+', name, flags=re.IGNORECASE)
+        home_team = parts[0].strip() if len(parts) >= 2 else "Team 1"
+        away_team = parts[1].strip() if len(parts) >= 2 else "Team 2"
+
+        real_matches.append({
+            "id": m_id,
+            "match_id": m_id,
+            "match_slug": m_id,
+            "name": name,
+            "title": name,
+            "home_team": home_team,
+            "away_team": away_team,
+            "competition": item.get("competition_name", ""),
+            "odds": []
+        })
+
+    logger.info(f"[SCRAPER] Filtered Real Matches Found: {len(real_matches)}")
+    return real_matches
 
 
 def set_list_url(new_url: str) -> str:
@@ -414,127 +503,22 @@ class ExchangeScraperEngine:
 
     async def fetch_live_exchange_matches(self) -> List[Dict[str, Any]]:
         """
-        Fetches live in-play cricket matches from Reddybook / Cricbet99 event listing feed.
-        Fetch URL: https://api.cricbet99.click/api/guest/event_list
-        Method: GET
-        Headers:
-          User-Agent: Mozilla/5.0 ...
-          Origin: https://reddybook.info
-          Referer: https://reddybook.info/
+        Fetches live in-play cricket matches from Cricbet99 event listing feed with SRL exclusion.
         """
         self.start_websocket_listener_task()
 
-        raw_data = []
+        matches = await get_live_matches()
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
-            "Origin": CURRENT_EXCHANGE_URL if CURRENT_EXCHANGE_URL else "https://reddybook.info",
-            "Referer": f"{CURRENT_EXCHANGE_URL.rstrip('/')}/" if CURRENT_EXCHANGE_URL else "https://reddybook.info/",
-            "Accept": "application/json, text/plain, */*"
-        }
-
-        session = await self.get_aiohttp_session()
-
-        # 1. Primary Event Listing Endpoint: GET CURRENT_CATALOG_URL (https://api.cricbet99.click/api/guest/event_list)
-        if CURRENT_CATALOG_URL:
-            try:
-                async with session.get(
-                    CURRENT_CATALOG_URL,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=5.0)
-                ) as resp:
-                    self.last_fetch_status = resp.status
-                    if resp.status == 200:
-                        try:
-                            data = await resp.json(content_type=None)
-                            if isinstance(data, dict):
-                                d_inner = data.get("data")
-                                if isinstance(d_inner, dict):
-                                    events_list = d_inner.get("events") or d_inner.get("matches") or d_inner.get("items") or []
-                                else:
-                                    events_list = data.get("events") or data.get("matches") or data.get("data") or data.get("result") or []
-
-                                if isinstance(events_list, list) and events_list:
-                                    raw_data = events_list
-                            elif isinstance(data, list) and data:
-                                raw_data = data
-                        except Exception as parse_ex:
-                            logger.debug(f"Event List JSON parse notice ({CURRENT_CATALOG_URL}): {parse_ex}")
-            except Exception as e:
-                logger.debug(f"Event List GET notice ({CURRENT_CATALOG_URL}): {e}")
-
-        # 2. If Event List data is empty, try POST catalog fallback (operatorId: 11xplay)
-        if not raw_data:
-            fallback_post_url = "https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates"
-            try:
-                post_headers = {
-                    "accept": "application/json, text/plain, */*",
-                    "content-type": "application/json",
-                    "origin": "https://reddybook.info",
-                    "referer": "https://reddybook.info/",
-                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
-                }
-                async with session.post(
-                    fallback_post_url,
-                    json={"operatorId": "11xplay"},
-                    headers=post_headers,
-                    timeout=aiohttp.ClientTimeout(total=4.0)
-                ) as resp:
-                    if resp.status == 200:
-                        try:
-                            data = await resp.json(content_type=None)
-                            if isinstance(data, list) and data:
-                                raw_data = data
-                            elif isinstance(data, dict):
-                                m_list = data.get("matches") or data.get("data") or data.get("result") or data.get("items") or data.get("events") or []
-                                if isinstance(m_list, list) and m_list:
-                                    raw_data = m_list
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.debug(f"POST catalog fallback notice: {e}")
-
-        # 3. If still empty, check MARKET_CACHE
-        if not raw_data:
-            async with MARKET_CACHE_LOCK:
-                if MARKET_CACHE:
-                    raw_data = list(MARKET_CACHE.values())
-
-        # 4. Filter and Parse Live Cricket Matches (Schema: event_type_id == 4, in_play == 1, name has 'v' or 'vs')
-        matches = []
-        if isinstance(raw_data, list):
-            for ev in raw_data:
-                if isinstance(ev, dict):
-                    event_type = str(ev.get("event_type_id") or ev.get("sports_id") or ev.get("sport_id") or "")
-                    in_play = str(ev.get("in_play") if ev.get("in_play") is not None else "")
-                    name = str(ev.get("name") or ev.get("event_name") or ev.get("title") or "")
-                    name_lower = name.lower()
-
-                    # Cricket matches have event_type_id == 4 (or sports_id == 4 or name containing vs/v)
-                    if event_type and event_type not in ["4", "0"]:
-                        continue
-
-                    # Prefer live in-play matches (in_play == 1 or true) if in_play field is provided
-                    if in_play and in_play not in ["1", "true", "True"]:
-                        continue
-
-                    # Filter out generic league names, keep actual fixtures containing ' v ' or ' vs ' or ' - '
-                    if name and not (" v " in name_lower or " vs " in name_lower or " - " in name_lower):
-                        continue
-
-                    m_parsed = self._parse_exchange_match(ev)
-                    if m_parsed:
-                        # Enrich with real-time odds from MARKET_CACHE if available
-                        m_id = m_parsed.get("id") or m_parsed.get("match_id")
-                        if m_id:
-                            async with MARKET_CACHE_LOCK:
-                                cached_item = MARKET_CACHE.get(str(m_id))
-                                if cached_item:
-                                    enriched = self._parse_exchange_match(cached_item)
-                                    if enriched and enriched.get("odds"):
-                                        m_parsed["odds"] = enriched["odds"]
-
-                        matches.append(m_parsed)
+        # Enrich matches with real-time odds from MARKET_CACHE if available
+        for m in matches:
+            m_id = m.get("id") or m.get("match_id")
+            if m_id:
+                async with MARKET_CACHE_LOCK:
+                    cached_item = MARKET_CACHE.get(str(m_id))
+                    if cached_item:
+                        enriched = self._parse_exchange_match(cached_item)
+                        if enriched and enriched.get("odds"):
+                            m["odds"] = enriched["odds"]
 
         return matches
 

@@ -37,7 +37,9 @@ from exchange_scraper import (
     CURRENT_CATALOG_URL,
     CURRENT_ODDS_URL,
     DEFAULT_CATALOG_URL,
-    DEFAULT_ODDS_URL
+    DEFAULT_ODDS_URL,
+    get_live_matches,
+    BLOCKED_KEYWORDS
 )
 
 ADMIN_ID = 7592394328
@@ -1236,6 +1238,8 @@ class TelegramOddsBot:
         self.client.send_message(chat_id, help_text)
 
     async def _cmd_matches_async(self, chat_id: str | int, user_id: Optional[int] = None):
+        await asyncio.to_thread(self.client.send_message, chat_id, "🔄 Fetching live exchange fixtures...", "HTML", False)
+        
         try:
             raw_matches = await global_exchange_scraper.fetch_live_matches_async()
         except Exception as e:
@@ -1251,7 +1255,10 @@ class TelegramOddsBot:
             matches.append(m)
 
         if not matches:
-            msg = "⚠️ No live in-play cricket matches on the exchange right now."
+            msg = (
+                "⚠️ No active live exchange matches found right now.\n"
+                "Check Render logs to see if cricbet API responded or returned empty."
+            )
             await asyncio.to_thread(self.client.send_message, chat_id, msg, "HTML", False)
             return
 
