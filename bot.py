@@ -633,9 +633,8 @@ class TelegramOddsBot:
             print(f"Health Check HTTP Server: 0.0.0.0:{self.port}")
             print(f"==================================================\n")
 
-        # 3. Start Odds Engine async loop & WebSocket Listener Task
+        # 3. Start Odds Engine async loop
         await self.engine.start_async()
-        global_exchange_scraper.start_websocket_listener_task()
         self.running = True
 
         # 4. Reload saved active tracking sessions from active_job.json

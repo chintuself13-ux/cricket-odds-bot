@@ -182,51 +182,10 @@ async def update_market_cache_from_payload(data: Any):
 
 async def run_websocket_listener():
     """
-    Background worker that connects to the Reddybook WebSocket stream:
-    wss://odd.ocric99.com/ws/getMarketDataNew
-    Receives live market updates and populates MARKET_CACHE.
-    Auto-reconnects on disconnection.
+    WebSocket listener permanently disabled. Matches & market data fetched via standard HTTP GET.
     """
-    ws_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": f"{CURRENT_EXCHANGE_URL}/",
-        "Origin": CURRENT_EXCHANGE_URL,
-    }
-
-    logger.info(f"Starting WebSocket listener targeting {WS_URL}...")
-
-    while True:
-        try:
-            session = await global_exchange_scraper.get_aiohttp_session()
-            dynamic_ws = WS_URL
-            if CURRENT_EXCHANGE_URL and "reddybook" not in CURRENT_EXCHANGE_URL.lower():
-                domain = CURRENT_EXCHANGE_URL.replace("https://", "").replace("http://", "").rstrip("/")
-                dynamic_ws = f"wss://{domain}/ws/getMarketDataNew"
-
-            logger.info(f"Connecting to WebSocket stream: {dynamic_ws}")
-            async with session.ws_connect(
-                dynamic_ws,
-                headers=ws_headers,
-                heartbeat=30.0,
-                timeout=aiohttp.ClientTimeout(total=15.0)
-            ) as ws:
-                logger.info(f"✅ Connected to WebSocket stream successfully: {dynamic_ws}")
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        try:
-                            payload = json.loads(msg.data)
-                            await update_market_cache_from_payload(payload)
-                        except Exception as p_err:
-                            logger.debug(f"WS JSON frame parse notice: {p_err}")
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                        logger.warning(f"WebSocket closed/error: {msg.data}")
-                        break
-        except asyncio.CancelledError:
-            logger.info("WebSocket listener task cancelled.")
-            break
-        except Exception as e:
-            logger.warning(f"WebSocket connection error ({e}). Auto-reconnecting in 5s...")
-            await asyncio.sleep(5.0)
+    logger.info("WebSocket listener is disabled.")
+    return
 
 
 def set_exchange_url(new_url: str) -> str:
@@ -488,39 +447,15 @@ class ExchangeScraperEngine:
 
     def start_websocket_listener_task(self) -> Optional[asyncio.Task]:
         """
-        Launches the background WebSocket listener task if not already running.
+        WebSocket listener disabled.
         """
-        global WS_TASK
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return None
-
-        if WS_TASK is None or WS_TASK.done():
-            WS_TASK = loop.create_task(run_websocket_listener())
-            logger.info("WebSocket listener background task launched.")
-        return WS_TASK
+        return None
 
     async def fetch_live_exchange_matches(self) -> List[Dict[str, Any]]:
         """
-        Fetches live in-play cricket matches from Cricbet99 event listing feed with SRL exclusion.
+        Fetches live in-play cricket matches directly from Cricbet99 event listing feed with SRL exclusion.
         """
-        self.start_websocket_listener_task()
-
-        matches = await get_live_matches()
-
-        # Enrich matches with real-time odds from MARKET_CACHE if available
-        for m in matches:
-            m_id = m.get("id") or m.get("match_id")
-            if m_id:
-                async with MARKET_CACHE_LOCK:
-                    cached_item = MARKET_CACHE.get(str(m_id))
-                    if cached_item:
-                        enriched = self._parse_exchange_match(cached_item)
-                        if enriched and enriched.get("odds"):
-                            m["odds"] = enriched["odds"]
-
-        return matches
+        return await get_live_matches()
 
     async def fetch_live_matches_async(self) -> List[Dict[str, Any]]:
         return await self.fetch_live_exchange_matches()
