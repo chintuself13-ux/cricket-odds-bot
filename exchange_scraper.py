@@ -17,6 +17,100 @@ CURRENT_EXCHANGE_URL = os.getenv("EXCHANGE_URL", DEFAULT_DOMAIN).rstrip("/")
 BASE_URL = CURRENT_EXCHANGE_URL
 BASE_EXCHANGE_URL = CURRENT_EXCHANGE_URL
 
+MARKET_CACHE: Dict[str, Dict[str, Any]] = {}
+MARKET_CACHE_LOCK = asyncio.Lock()
+WS_TASK: Optional[asyncio.Task] = None
+WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
+
+
+async def update_market_cache_from_payload(data: Any):
+    """
+    Parses JSON payload frames from WebSocket stream and updates global MARKET_CACHE.
+    """
+    global MARKET_CACHE
+    if not data:
+        return
+
+    items_to_cache = []
+    if isinstance(data, list):
+        items_to_cache = data
+    elif isinstance(data, dict):
+        m_list = (
+            data.get("matches") or data.get("data") or
+            data.get("result") or data.get("items") or
+            data.get("gmarket") or []
+        )
+        if isinstance(m_list, list) and m_list:
+            items_to_cache = m_list
+        elif "runners" in data:
+            items_to_cache = [data]
+
+    if not items_to_cache:
+        return
+
+    async with MARKET_CACHE_LOCK:
+        for item in items_to_cache:
+            if isinstance(item, dict):
+                m_id = str(
+                    item.get("match_id") or item.get("matchId") or item.get("eventId") or
+                    item.get("marketId") or item.get("id") or item.get("gmarket") or ""
+                )
+                if not m_id:
+                    event_name = item.get("event_name") or item.get("eventName") or item.get("matchName") or ""
+                    m_id = event_name.lower().replace(" ", "-") if event_name else str(len(MARKET_CACHE) + 1)
+
+                MARKET_CACHE[m_id] = item
+
+
+async def run_websocket_listener():
+    """
+    Background worker that connects to the Reddybook WebSocket stream:
+    wss://odd.ocric99.com/ws/getMarketDataNew
+    Receives live market updates and populates MARKET_CACHE.
+    Auto-reconnects on disconnection.
+    """
+    ws_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": f"{CURRENT_EXCHANGE_URL}/",
+        "Origin": CURRENT_EXCHANGE_URL,
+    }
+
+    logger.info(f"Starting WebSocket listener targeting {WS_URL}...")
+
+    while True:
+        try:
+            session = await global_exchange_scraper.get_aiohttp_session()
+            dynamic_ws = WS_URL
+            if CURRENT_EXCHANGE_URL and "reddybook" not in CURRENT_EXCHANGE_URL.lower():
+                domain = CURRENT_EXCHANGE_URL.replace("https://", "").replace("http://", "").rstrip("/")
+                dynamic_ws = f"wss://{domain}/ws/getMarketDataNew"
+
+            logger.info(f"Connecting to WebSocket stream: {dynamic_ws}")
+            async with session.ws_connect(
+                dynamic_ws,
+                headers=ws_headers,
+                heartbeat=30.0,
+                timeout=aiohttp.ClientTimeout(total=15.0)
+            ) as ws:
+                logger.info(f"✅ Connected to WebSocket stream successfully: {dynamic_ws}")
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            payload = json.loads(msg.data)
+                            await update_market_cache_from_payload(payload)
+                        except Exception as p_err:
+                            logger.debug(f"WS JSON frame parse notice: {p_err}")
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        logger.warning(f"WebSocket closed/error: {msg.data}")
+                        break
+        except asyncio.CancelledError:
+            logger.info("WebSocket listener task cancelled.")
+            break
+        except Exception as e:
+            logger.warning(f"WebSocket connection error ({e}). Auto-reconnecting in 5s...")
+            await asyncio.sleep(5.0)
+
+
 def set_exchange_url(new_url: str) -> str:
     global CURRENT_EXCHANGE_URL, BASE_URL, BASE_EXCHANGE_URL
     if new_url:
@@ -274,90 +368,80 @@ class ExchangeScraperEngine:
             "odds": odds_arr
         }
 
+    def start_websocket_listener_task(self) -> Optional[asyncio.Task]:
+        """
+        Launches the background WebSocket listener task if not already running.
+        """
+        global WS_TASK
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+        if WS_TASK is None or WS_TASK.done():
+            WS_TASK = loop.create_task(run_websocket_listener())
+            logger.info("WebSocket listener background task launched.")
+        return WS_TASK
+
     async def fetch_live_exchange_matches(self) -> List[Dict[str, Any]]:
         """
-        Fetches live in-play cricket matches directly from Reddybook / Diamond Exchange internal feed.
-        Primary Endpoint: https://odd.ocric99.com/ws/getMarketDataNew
+        Fetches live in-play cricket matches directly from Reddybook / Diamond Exchange.
+        Reads primarily from the WebSocket MARKET_CACHE, falling back to HTTP REST endpoints if empty.
         """
-        routes = [
-            "https://odd.ocric99.com/ws/getMarketDataNew",
-            f"{CURRENT_EXCHANGE_URL}/ws/getMarketDataNew",
-            f"{CURRENT_EXCHANGE_URL}/api/v1/inplay-matches",
-            f"{CURRENT_EXCHANGE_URL}/api/v1/getCricketMatches",
-            f"{CURRENT_EXCHANGE_URL}/api/v1/listMarketBook"
-        ]
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": f"{CURRENT_EXCHANGE_URL}/",
-            "Origin": CURRENT_EXCHANGE_URL,
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/plain, */*"
-        }
+        self.start_websocket_listener_task()
 
         raw_data = []
-        session = await self.get_aiohttp_session()
+        async with MARKET_CACHE_LOCK:
+            if MARKET_CACHE:
+                raw_data = list(MARKET_CACHE.values())
 
-        for ep in routes:
-            # 1. Attempt POST request
-            try:
-                async with session.post(ep, json={}, headers=headers, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
-                    self.last_fetch_status = resp.status
-                    if resp.status == 200:
-                        try:
-                            data = await resp.json(content_type=None)
-                            if isinstance(data, list) and data:
-                                raw_data = data
-                                break
-                            elif isinstance(data, dict):
-                                m_list = (
-                                    data.get("matches") or data.get("data") or
-                                    data.get("result") or data.get("items") or
-                                    data.get("gmarket") or []
-                                )
-                                if isinstance(m_list, list) and m_list:
-                                    raw_data = m_list
-                                    break
-                                elif "runners" in data:
-                                    raw_data = [data]
-                                    break
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.debug(f"Exchange POST route notice ({ep}): {e}")
+        if not raw_data:
+            # Fallback to REST HTTP endpoints if MARKET_CACHE is empty
+            routes = [
+                f"{CURRENT_EXCHANGE_URL}/api/v1/inplay-matches",
+                f"{CURRENT_EXCHANGE_URL}/api/v1/getCricketMatches",
+                f"{CURRENT_EXCHANGE_URL}/api/v1/listMarketBook"
+            ]
 
-            if raw_data:
-                break
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": f"{CURRENT_EXCHANGE_URL}/",
+                "Origin": CURRENT_EXCHANGE_URL,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*"
+            }
 
-            # 2. Fallback to GET request
-            try:
-                async with session.get(ep, headers=headers, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
-                    self.last_fetch_status = resp.status
-                    if resp.status == 200:
-                        try:
-                            data = await resp.json(content_type=None)
-                            if isinstance(data, list) and data:
-                                raw_data = data
-                                break
-                            elif isinstance(data, dict):
-                                m_list = (
-                                    data.get("matches") or data.get("data") or
-                                    data.get("result") or data.get("items") or
-                                    data.get("gmarket") or []
-                                )
-                                if isinstance(m_list, list) and m_list:
-                                    raw_data = m_list
-                                    break
-                                elif "runners" in data:
-                                    raw_data = [data]
-                                    break
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.debug(f"Exchange GET route notice ({ep}): {e}")
+            session = await self.get_aiohttp_session()
 
-            if raw_data:
-                break
+            for ep in routes:
+                try:
+                    async with session.get(ep, headers=headers, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
+                        self.last_fetch_status = resp.status
+                        if resp.status == 200:
+                            try:
+                                data = await resp.json(content_type=None)
+                                if isinstance(data, list) and data:
+                                    raw_data = data
+                                    break
+                                elif isinstance(data, dict):
+                                    m_list = (
+                                        data.get("matches") or data.get("data") or
+                                        data.get("result") or data.get("items") or
+                                        data.get("gmarket") or []
+                                    )
+                                    if isinstance(m_list, list) and m_list:
+                                        raw_data = m_list
+                                        break
+                                    elif "runners" in data:
+                                        raw_data = [data]
+                                        break
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.debug(f"Exchange GET route notice ({ep}): {e}")
+
+                if raw_data:
+                    break
 
         matches = []
         if isinstance(raw_data, list):
