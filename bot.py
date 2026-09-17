@@ -22,7 +22,23 @@ except ImportError:
     HAS_PYMONGO = False
 
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
-from exchange_scraper import global_exchange_scraper, format_indian_odds, is_team_match, set_base_url, set_exchange_url, DEFAULT_DOMAIN, CURRENT_EXCHANGE_URL, BASE_URL, BASE_EXCHANGE_URL
+from exchange_scraper import (
+    global_exchange_scraper,
+    format_indian_odds,
+    is_team_match,
+    set_base_url,
+    set_exchange_url,
+    set_list_url,
+    set_odds_url,
+    DEFAULT_DOMAIN,
+    CURRENT_EXCHANGE_URL,
+    BASE_URL,
+    BASE_EXCHANGE_URL,
+    CURRENT_CATALOG_URL,
+    CURRENT_ODDS_URL,
+    DEFAULT_CATALOG_URL,
+    DEFAULT_ODDS_URL
+)
 
 ADMIN_ID = 7592394328
 
@@ -755,6 +771,14 @@ class TelegramOddsBot:
                 asyncio.create_task(self._cmd_setdomain_async(chat_id, user_id, parts[1:], from_user))
                 return
 
+            if cmd in ["/setlisturl", "/setcatalogurl"]:
+                asyncio.create_task(self._cmd_setlisturl_async(chat_id, user_id, parts[1:], from_user))
+                return
+
+            if cmd in ["/setoddsurl", "/setfeedurl"]:
+                asyncio.create_task(self._cmd_setoddsurl_async(chat_id, user_id, parts[1:], from_user))
+                return
+
             if cmd in ["/allow", "/revoke", "/users", "/reject", "/msg"]:
                 if not is_admin:
                     asyncio.create_task(asyncio.to_thread(self.client.send_message, chat_id, "❌ Only the Admin can use this command.", "HTML", False))
@@ -1127,6 +1151,58 @@ class TelegramOddsBot:
         reply_msg = f"🌐 <b>Exchange Base Domain Updated!</b>\nNew Base URL: <code>{updated_url}</code>\nUpdates active dynamically without code redeployment."
         await asyncio.to_thread(self.client.send_message, chat_id, reply_msg, "HTML", False)
 
+    async def _cmd_setlisturl_async(self, chat_id: str | int, user_id: int, args: list, from_user: Dict[str, Any]):
+        sender_id = from_user.get("id") if from_user else user_id
+        try:
+            sender_id = int(sender_id)
+        except (ValueError, TypeError):
+            pass
+
+        if sender_id != ADMIN_ID and sender_id != DEFAULT_ADMIN_ID:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Only Admin can use this command.", "HTML", False)
+            return
+
+        if not args:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "⚠️ <b>Usage Syntax:</b> <code>/setlisturl &lt;new_url&gt;</code>\n"
+                "<i>Default:</i> <code>https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates</code>",
+                "HTML", False
+            )
+            return
+
+        raw_url = args[0].strip()
+        updated_url = set_list_url(raw_url)
+        reply_msg = f"🌐 <b>Match Catalog Listing URL Updated!</b>\nNew Catalog URL: <code>{updated_url}</code>\nUpdates active dynamically."
+        await asyncio.to_thread(self.client.send_message, chat_id, reply_msg, "HTML", False)
+
+    async def _cmd_setoddsurl_async(self, chat_id: str | int, user_id: int, args: list, from_user: Dict[str, Any]):
+        sender_id = from_user.get("id") if from_user else user_id
+        try:
+            sender_id = int(sender_id)
+        except (ValueError, TypeError):
+            pass
+
+        if sender_id != ADMIN_ID and sender_id != DEFAULT_ADMIN_ID:
+            await asyncio.to_thread(self.client.send_message, chat_id, "❌ Only Admin can use this command.", "HTML", False)
+            return
+
+        if not args:
+            await asyncio.to_thread(
+                self.client.send_message,
+                chat_id,
+                "⚠️ <b>Usage Syntax:</b> <code>/setoddsurl &lt;new_url&gt;</code>\n"
+                "<i>Default:</i> <code>https://odd.ocric99.com/ws/getMarketDataNew</code>",
+                "HTML", False
+            )
+            return
+
+        raw_url = args[0].strip()
+        updated_url = set_odds_url(raw_url)
+        reply_msg = f"⚡ <b>Live Odds Feed URL Updated!</b>\nNew Odds URL: <code>{updated_url}</code>\nWebSocket feed auto-reconnecting..."
+        await asyncio.to_thread(self.client.send_message, chat_id, reply_msg, "HTML", False)
+
     def _cmd_start(self, chat_id: str | int, user_id: Optional[str | int] = None):
         is_admin = (user_id and (user_id == DEFAULT_ADMIN_ID or str(user_id) == str(DEFAULT_ADMIN_ID)))
         admin_extra = (
@@ -1137,6 +1213,8 @@ class TelegramOddsBot:
             "• <code>/msg &lt;user_id&gt; &lt;text&gt;</code> — Direct message user\n"
             "• <code>/users</code> — View all active users &amp; remaining days\n"
             "• <code>/setdomain &lt;new_url&gt;</code> — Update Exchange Base URL dynamically\n"
+            "• <code>/setlisturl &lt;new_url&gt;</code> — Update Match Catalog Listing URL\n"
+            "• <code>/setoddsurl &lt;new_url&gt;</code> — Update Live Odds Feed URL\n"
             "• <code>/setodd &lt;team&gt; &lt;odd&gt;</code> — Modify live odd for instant testing"
         ) if is_admin else ""
 

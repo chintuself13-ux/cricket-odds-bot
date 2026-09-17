@@ -17,10 +17,39 @@ CURRENT_EXCHANGE_URL = os.getenv("EXCHANGE_URL", DEFAULT_DOMAIN).rstrip("/")
 BASE_URL = CURRENT_EXCHANGE_URL
 BASE_EXCHANGE_URL = CURRENT_EXCHANGE_URL
 
+DEFAULT_CATALOG_URL = "https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates"
+CURRENT_CATALOG_URL = os.getenv("CATALOG_URL", DEFAULT_CATALOG_URL)
+
+DEFAULT_ODDS_URL = "https://odd.ocric99.com/ws/getMarketDataNew"
+CURRENT_ODDS_URL = os.getenv("ODDS_URL", DEFAULT_ODDS_URL)
+
 MARKET_CACHE: Dict[str, Dict[str, Any]] = {}
 MARKET_CACHE_LOCK = asyncio.Lock()
 WS_TASK: Optional[asyncio.Task] = None
-WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
+WS_URL = CURRENT_ODDS_URL.replace("https://", "wss://").replace("http://", "ws://")
+
+
+def set_list_url(new_url: str) -> str:
+    global CURRENT_CATALOG_URL
+    if new_url:
+        url_str = new_url.strip()
+        if not (url_str.startswith("http://") or url_str.startswith("https://")):
+            url_str = "https://" + url_str
+        CURRENT_CATALOG_URL = url_str
+        logger.info(f"CURRENT_CATALOG_URL updated dynamically to: {CURRENT_CATALOG_URL}")
+    return CURRENT_CATALOG_URL
+
+
+def set_odds_url(new_url: str) -> str:
+    global CURRENT_ODDS_URL, WS_URL
+    if new_url:
+        url_str = new_url.strip()
+        if not (url_str.startswith("http://") or url_str.startswith("https://") or url_str.startswith("ws://") or url_str.startswith("wss://")):
+            url_str = "https://" + url_str
+        CURRENT_ODDS_URL = url_str
+        WS_URL = CURRENT_ODDS_URL.replace("https://", "wss://").replace("http://", "ws://")
+        logger.info(f"CURRENT_ODDS_URL updated dynamically to: {CURRENT_ODDS_URL} (WS: {WS_URL})")
+    return CURRENT_ODDS_URL
 
 
 async def update_market_cache_from_payload(data: Any):
@@ -385,33 +414,61 @@ class ExchangeScraperEngine:
 
     async def fetch_live_exchange_matches(self) -> List[Dict[str, Any]]:
         """
-        Fetches live in-play cricket matches directly from Reddybook / Diamond Exchange.
-        Reads primarily from the WebSocket MARKET_CACHE, falling back to HTTP REST endpoints if empty.
+        Fetches live in-play cricket matches from catalog & exchange feeds.
+        Primary Listing Endpoint: https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates
+        Live Odds Stream: https://odd.ocric99.com/ws/getMarketDataNew
         """
         self.start_websocket_listener_task()
 
         raw_data = []
-        async with MARKET_CACHE_LOCK:
-            if MARKET_CACHE:
-                raw_data = list(MARKET_CACHE.values())
 
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": f"{CURRENT_EXCHANGE_URL}/",
+            "Origin": CURRENT_EXCHANGE_URL,
+            "Accept": "application/json, text/plain, */*"
+        }
+
+        session = await self.get_aiohttp_session()
+
+        # 1. Primary Match Listing Endpoint: CURRENT_CATALOG_URL
+        if CURRENT_CATALOG_URL:
+            try:
+                async with session.get(CURRENT_CATALOG_URL, headers=headers, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
+                    self.last_fetch_status = resp.status
+                    if resp.status == 200:
+                        try:
+                            data = await resp.json(content_type=None)
+                            if isinstance(data, list) and data:
+                                raw_data = data
+                            elif isinstance(data, dict):
+                                m_list = (
+                                    data.get("matches") or data.get("data") or
+                                    data.get("result") or data.get("items") or
+                                    data.get("events") or data.get("gmarket") or []
+                                )
+                                if isinstance(m_list, list) and m_list:
+                                    raw_data = m_list
+                                elif "runners" in data:
+                                    raw_data = [data]
+                        except Exception as parse_ex:
+                            logger.debug(f"Catalog JSON parse notice ({CURRENT_CATALOG_URL}): {parse_ex}")
+            except Exception as e:
+                logger.debug(f"Catalog fetch notice ({CURRENT_CATALOG_URL}): {e}")
+
+        # 2. If catalog data is empty, check MARKET_CACHE
         if not raw_data:
-            # Fallback to REST HTTP endpoints if MARKET_CACHE is empty
+            async with MARKET_CACHE_LOCK:
+                if MARKET_CACHE:
+                    raw_data = list(MARKET_CACHE.values())
+
+        # 3. Fallback REST HTTP endpoints on CURRENT_EXCHANGE_URL if still empty
+        if not raw_data:
             routes = [
                 f"{CURRENT_EXCHANGE_URL}/api/v1/inplay-matches",
                 f"{CURRENT_EXCHANGE_URL}/api/v1/getCricketMatches",
                 f"{CURRENT_EXCHANGE_URL}/api/v1/listMarketBook"
             ]
-
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": f"{CURRENT_EXCHANGE_URL}/",
-                "Origin": CURRENT_EXCHANGE_URL,
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/plain, */*"
-            }
-
-            session = await self.get_aiohttp_session()
 
             for ep in routes:
                 try:
@@ -448,6 +505,16 @@ class ExchangeScraperEngine:
             for item in raw_data:
                 m_parsed = self._parse_exchange_match(item)
                 if m_parsed:
+                    # Enrich with real-time odds from MARKET_CACHE if available
+                    m_id = m_parsed.get("id") or m_parsed.get("match_id")
+                    if m_id:
+                        async with MARKET_CACHE_LOCK:
+                            cached_item = MARKET_CACHE.get(str(m_id))
+                            if cached_item:
+                                enriched = self._parse_exchange_match(cached_item)
+                                if enriched and enriched.get("odds"):
+                                    m_parsed["odds"] = enriched["odds"]
+
                     matches.append(m_parsed)
 
         return matches
