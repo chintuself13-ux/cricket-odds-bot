@@ -22,7 +22,7 @@ except ImportError:
     HAS_PYMONGO = False
 
 from odds_engine import MultiTrackOddsEngine, TrackJob, global_odds_data_engine
-from exchange_scraper import global_exchange_scraper, format_indian_odds, is_team_match, set_base_url, set_exchange_url, BASE_URL, BASE_EXCHANGE_URL
+from exchange_scraper import global_exchange_scraper, format_indian_odds, is_team_match, set_base_url, set_exchange_url, DEFAULT_DOMAIN, CURRENT_EXCHANGE_URL, BASE_URL, BASE_EXCHANGE_URL
 
 ADMIN_ID = 7592394328
 

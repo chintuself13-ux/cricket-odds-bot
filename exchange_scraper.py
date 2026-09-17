@@ -15,15 +15,17 @@ logger = logging.getLogger("ExchangeScraper")
 DEFAULT_DOMAIN = "https://reddybook.info"
 CURRENT_EXCHANGE_URL = os.getenv("EXCHANGE_URL", DEFAULT_DOMAIN).rstrip("/")
 BASE_URL = CURRENT_EXCHANGE_URL
+BASE_EXCHANGE_URL = CURRENT_EXCHANGE_URL
 
 def set_exchange_url(new_url: str) -> str:
-    global CURRENT_EXCHANGE_URL, BASE_URL
+    global CURRENT_EXCHANGE_URL, BASE_URL, BASE_EXCHANGE_URL
     if new_url:
         url_str = new_url.strip()
         if not (url_str.startswith("http://") or url_str.startswith("https://")):
             url_str = "https://" + url_str
         CURRENT_EXCHANGE_URL = url_str.rstrip("/")
         BASE_URL = CURRENT_EXCHANGE_URL
+        BASE_EXCHANGE_URL = CURRENT_EXCHANGE_URL
         logger.info(f"CURRENT_EXCHANGE_URL updated dynamically to: {CURRENT_EXCHANGE_URL}")
     return CURRENT_EXCHANGE_URL
 
