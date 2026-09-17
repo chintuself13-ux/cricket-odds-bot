@@ -1247,17 +1247,7 @@ class TelegramOddsBot:
         home_short = clean_short_team_name(home_team)
         away_short = clean_short_team_name(away_team)
 
-        # Hard-Fix Favourite/Underdog Odds Inversion:
-        # Australia is the ground favourite, its rate CANNOT be > 2.0 while opponent is < 2.0.
-        if home_back is not None and away_back is not None:
-            if "aus" in home_short.lower() and float(home_back) > 2.0 and float(away_back) < 2.0:
-                home_back, away_back = away_back, home_back
-                home_lay, away_lay = away_lay, home_lay
-                home_bhav_str, away_bhav_str = away_bhav_str, home_bhav_str
-            elif "aus" in away_short.lower() and float(away_back) > 2.0 and float(home_back) < 2.0:
-                home_back, away_back = away_back, home_back
-                home_lay, away_lay = away_lay, home_lay
-                home_bhav_str, away_bhav_str = away_bhav_str, home_bhav_str
+        # Odds strictly tied to each runner name directly from the exchange feed
 
         inline_keyboard = [
             [

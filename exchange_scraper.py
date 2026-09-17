@@ -174,45 +174,65 @@ class ExchangeScraperEngine:
         if not isinstance(item, dict):
             return None
 
-        match_id = str(item.get("match_id") or item.get("matchId") or item.get("eventId") or item.get("marketId") or item.get("id") or "")
+        match_id = str(item.get("match_id") or item.get("matchId") or item.get("eventId") or item.get("marketId") or item.get("id") or item.get("gmarket") or "")
         
-        event_name = item.get("event_name") or item.get("eventName") or item.get("matchName") or item.get("title") or ""
-        home_team = self._clean_team_name(item.get("home_team") or item.get("homeTeam") or item.get("team1") or "")
-        away_team = self._clean_team_name(item.get("away_team") or item.get("awayTeam") or item.get("team2") or "")
+        event_name = item.get("event_name") or item.get("eventName") or item.get("matchName") or item.get("title") or item.get("name") or ""
+        home_team = self._clean_team_name(item.get("home_team") or item.get("homeTeam") or item.get("team1") or item.get("runner1") or "")
+        away_team = self._clean_team_name(item.get("away_team") or item.get("awayTeam") or item.get("team2") or item.get("runner2") or "")
 
         if (not home_team or not away_team) and event_name:
-            parts = re.split(r'\s+(?:vs|v)\s+', event_name, flags=re.IGNORECASE)
+            parts = re.split(r'\s+(?:vs|v|-)\s+', event_name, flags=re.IGNORECASE)
             if len(parts) >= 2:
                 home_team = self._clean_team_name(parts[0])
                 away_team = self._clean_team_name(parts[1])
 
+        runners = item.get("runners") or item.get("runnersBook") or item.get("outcomes") or item.get("runner") or item.get("section") or []
+
+        if (not home_team or not away_team) and isinstance(runners, list) and len(runners) >= 2:
+            r0 = runners[0] if isinstance(runners[0], dict) else {}
+            r1 = runners[1] if isinstance(runners[1], dict) else {}
+            t0 = r0.get("runnerName") or r0.get("name") or r0.get("nation") or r0.get("team")
+            t1 = r1.get("runnerName") or r1.get("name") or r1.get("nation") or r1.get("team")
+            if t0 and t1:
+                home_team = self._clean_team_name(t0)
+                away_team = self._clean_team_name(t1)
+
         if not home_team or not away_team or home_team.lower() == away_team.lower():
             return None
 
-        runners = item.get("runners") or item.get("runnersBook") or item.get("outcomes") or []
         odds_arr = []
 
         for idx, runner in enumerate(runners):
             if isinstance(runner, dict):
-                r_name = self._clean_team_name(runner.get("runnerName") or runner.get("name") or runner.get("team") or (home_team if idx == 0 else away_team))
+                r_name = self._clean_team_name(runner.get("runnerName") or runner.get("name") or runner.get("nation") or runner.get("team") or (home_team if idx == 0 else away_team))
                 
                 back_price = None
-                back_data = runner.get("back") or runner.get("b1") or runner.get("price")
+                back_data = (
+                    runner.get("b1") if runner.get("b1") is not None else
+                    runner.get("back") if runner.get("back") is not None else
+                    runner.get("price") if runner.get("price") is not None else
+                    runner.get("rate") if runner.get("rate") is not None else
+                    runner.get("backPrice")
+                )
                 if isinstance(back_data, list) and back_data:
                     first_b = back_data[0]
                     if isinstance(first_b, dict):
-                        back_price = first_b.get("price") or first_b.get("rate")
+                        back_price = first_b.get("price") or first_b.get("rate") or first_b.get("b1")
                     elif isinstance(first_b, (int, float)):
                         back_price = float(first_b)
                 elif isinstance(back_data, (int, float)):
                     back_price = float(back_data)
 
                 lay_price = None
-                lay_data = runner.get("lay") or runner.get("l1")
+                lay_data = (
+                    runner.get("l1") if runner.get("l1") is not None else
+                    runner.get("lay") if runner.get("lay") is not None else
+                    runner.get("layPrice")
+                )
                 if isinstance(lay_data, list) and lay_data:
                     first_l = lay_data[0]
                     if isinstance(first_l, dict):
-                        lay_price = first_l.get("price") or first_l.get("rate")
+                        lay_price = first_l.get("price") or first_l.get("rate") or first_l.get("l1")
                     elif isinstance(first_l, (int, float)):
                         lay_price = float(first_l)
                 elif isinstance(lay_data, (int, float)):
@@ -225,7 +245,7 @@ class ExchangeScraperEngine:
                 if back_price is not None and isinstance(back_price, (int, float)) and back_price > 0:
                     if back_price < 1.0:
                         dec_price = round(1.0 + back_price, 2)
-                    elif back_price >= 1.0 and back_price < 100.0 and "." not in str(back_price):
+                    elif back_price >= 1.0 and back_price < 100.0 and "." not in str(back_price) and back_price < 1.5:
                         dec_price = round(1.0 + (back_price / 100.0), 2)
                     else:
                         dec_price = round(back_price, 2)
@@ -256,21 +276,22 @@ class ExchangeScraperEngine:
 
     async def fetch_live_exchange_matches(self) -> List[Dict[str, Any]]:
         """
-        Fetches live in-play cricket matches exclusively from Reddybook / Diamond Exchange.
-        Routes attempted:
-        - {CURRENT_EXCHANGE_URL}/api/v1/inplay-matches
-        - {CURRENT_EXCHANGE_URL}/api/v1/getCricketMatches
-        - {CURRENT_EXCHANGE_URL}/api/v1/listMarketBook
+        Fetches live in-play cricket matches directly from Reddybook / Diamond Exchange internal feed.
+        Primary Endpoint: https://odd.ocric99.com/ws/getMarketDataNew
         """
         routes = [
+            "https://odd.ocric99.com/ws/getMarketDataNew",
+            f"{CURRENT_EXCHANGE_URL}/ws/getMarketDataNew",
             f"{CURRENT_EXCHANGE_URL}/api/v1/inplay-matches",
             f"{CURRENT_EXCHANGE_URL}/api/v1/getCricketMatches",
             f"{CURRENT_EXCHANGE_URL}/api/v1/listMarketBook"
         ]
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": CURRENT_EXCHANGE_URL,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": f"{CURRENT_EXCHANGE_URL}/",
+            "Origin": CURRENT_EXCHANGE_URL,
+            "Content-Type": "application/json",
             "Accept": "application/json, text/plain, */*"
         }
 
@@ -278,26 +299,65 @@ class ExchangeScraperEngine:
         session = await self.get_aiohttp_session()
 
         for ep in routes:
+            # 1. Attempt POST request
+            try:
+                async with session.post(ep, json={}, headers=headers, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
+                    self.last_fetch_status = resp.status
+                    if resp.status == 200:
+                        try:
+                            data = await resp.json(content_type=None)
+                            if isinstance(data, list) and data:
+                                raw_data = data
+                                break
+                            elif isinstance(data, dict):
+                                m_list = (
+                                    data.get("matches") or data.get("data") or
+                                    data.get("result") or data.get("items") or
+                                    data.get("gmarket") or []
+                                )
+                                if isinstance(m_list, list) and m_list:
+                                    raw_data = m_list
+                                    break
+                                elif "runners" in data:
+                                    raw_data = [data]
+                                    break
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"Exchange POST route notice ({ep}): {e}")
+
+            if raw_data:
+                break
+
+            # 2. Fallback to GET request
             try:
                 async with session.get(ep, headers=headers, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
                     self.last_fetch_status = resp.status
                     if resp.status == 200:
-                        ct = resp.headers.get("Content-Type", "").lower()
-                        if "json" in ct or "text" in ct:
-                            try:
-                                data = await resp.json(content_type=None)
-                                if isinstance(data, list) and data:
-                                    raw_data = data
+                        try:
+                            data = await resp.json(content_type=None)
+                            if isinstance(data, list) and data:
+                                raw_data = data
+                                break
+                            elif isinstance(data, dict):
+                                m_list = (
+                                    data.get("matches") or data.get("data") or
+                                    data.get("result") or data.get("items") or
+                                    data.get("gmarket") or []
+                                )
+                                if isinstance(m_list, list) and m_list:
+                                    raw_data = m_list
                                     break
-                                elif isinstance(data, dict):
-                                    m_list = data.get("matches") or data.get("data") or data.get("result") or data.get("items") or []
-                                    if isinstance(m_list, list) and m_list:
-                                        raw_data = m_list
-                                        break
-                            except Exception:
-                                pass
+                                elif "runners" in data:
+                                    raw_data = [data]
+                                    break
+                        except Exception:
+                            pass
             except Exception as e:
-                logger.debug(f"Exchange endpoint route notice ({ep}): {e}")
+                logger.debug(f"Exchange GET route notice ({ep}): {e}")
+
+            if raw_data:
+                break
 
         matches = []
         if isinstance(raw_data, list):
