@@ -17,7 +17,7 @@ CURRENT_EXCHANGE_URL = os.getenv("EXCHANGE_URL", DEFAULT_DOMAIN).rstrip("/")
 BASE_URL = CURRENT_EXCHANGE_URL
 BASE_EXCHANGE_URL = CURRENT_EXCHANGE_URL
 
-DEFAULT_CATALOG_URL = "https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates"
+DEFAULT_CATALOG_URL = "https://api.cricbet99.click/api/guest/event_list"
 CURRENT_CATALOG_URL = os.getenv("CATALOG_URL", DEFAULT_CATALOG_URL)
 
 DEFAULT_ODDS_URL = "https://odd.ocric99.com/ws/getMarketDataNew"
@@ -414,62 +414,70 @@ class ExchangeScraperEngine:
 
     async def fetch_live_exchange_matches(self) -> List[Dict[str, Any]]:
         """
-        Fetches live in-play cricket matches from Reddybook / 11xplay catalog feed via POST payload.
-        Endpoint: https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates
-        Payload: {"operatorId": "11xplay"}
+        Fetches live in-play cricket matches from Reddybook / Cricbet99 event listing feed.
+        Fetch URL: https://api.cricbet99.click/api/guest/event_list
+        Method: GET
+        Headers:
+          User-Agent: Mozilla/5.0 ...
+          Origin: https://reddybook.info
+          Referer: https://reddybook.info/
         """
         self.start_websocket_listener_task()
 
         raw_data = []
 
         headers = {
-            "accept": "application/json, text/plain, */*",
-            "content-type": "application/json",
-            "origin": CURRENT_EXCHANGE_URL if CURRENT_EXCHANGE_URL else "https://reddybook.info",
-            "referer": f"{CURRENT_EXCHANGE_URL.rstrip('/')}/" if CURRENT_EXCHANGE_URL else "https://reddybook.info/",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+            "Origin": CURRENT_EXCHANGE_URL if CURRENT_EXCHANGE_URL else "https://reddybook.info",
+            "Referer": f"{CURRENT_EXCHANGE_URL.rstrip('/')}/" if CURRENT_EXCHANGE_URL else "https://reddybook.info/",
+            "Accept": "application/json, text/plain, */*"
         }
 
-        payload = {"operatorId": "11xplay"}
         session = await self.get_aiohttp_session()
 
-        # 1. Primary Reddybook / 11xplay POST Catalog Endpoint
+        # 1. Primary Event Listing Endpoint: GET CURRENT_CATALOG_URL (https://api.cricbet99.click/api/guest/event_list)
         if CURRENT_CATALOG_URL:
             try:
-                async with session.post(
+                async with session.get(
                     CURRENT_CATALOG_URL,
-                    json=payload,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=6.0)
+                    timeout=aiohttp.ClientTimeout(total=5.0)
                 ) as resp:
                     self.last_fetch_status = resp.status
                     if resp.status == 200:
                         try:
                             data = await resp.json(content_type=None)
-                            if isinstance(data, list) and data:
-                                raw_data = data
-                            elif isinstance(data, dict):
-                                m_list = (
-                                    data.get("matches") or data.get("data") or
-                                    data.get("result") or data.get("items") or
-                                    data.get("events") or data.get("rates") or
-                                    data.get("gmarket") or []
-                                )
-                                if isinstance(m_list, list) and m_list:
-                                    raw_data = m_list
-                                elif "runners" in data:
-                                    raw_data = [data]
-                        except Exception as parse_ex:
-                            logger.debug(f"Catalog POST JSON parse notice ({CURRENT_CATALOG_URL}): {parse_ex}")
-            except Exception as e:
-                logger.debug(f"Catalog POST fetch notice ({CURRENT_CATALOG_URL}): {e}")
+                            if isinstance(data, dict):
+                                d_inner = data.get("data")
+                                if isinstance(d_inner, dict):
+                                    events_list = d_inner.get("events") or d_inner.get("matches") or d_inner.get("items") or []
+                                else:
+                                    events_list = data.get("events") or data.get("matches") or data.get("data") or data.get("result") or []
 
-        # 2. If catalog POST data is empty, try GET catalog fallback
-        if not raw_data and CURRENT_CATALOG_URL:
+                                if isinstance(events_list, list) and events_list:
+                                    raw_data = events_list
+                            elif isinstance(data, list) and data:
+                                raw_data = data
+                        except Exception as parse_ex:
+                            logger.debug(f"Event List JSON parse notice ({CURRENT_CATALOG_URL}): {parse_ex}")
+            except Exception as e:
+                logger.debug(f"Event List GET notice ({CURRENT_CATALOG_URL}): {e}")
+
+        # 2. If Event List data is empty, try POST catalog fallback (operatorId: 11xplay)
+        if not raw_data:
+            fallback_post_url = "https://catalog.mysportsfeed.io/api/v2/core/get-sr-rates"
             try:
-                async with session.get(
-                    CURRENT_CATALOG_URL,
-                    headers=headers,
+                post_headers = {
+                    "accept": "application/json, text/plain, */*",
+                    "content-type": "application/json",
+                    "origin": "https://reddybook.info",
+                    "referer": "https://reddybook.info/",
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+                }
+                async with session.post(
+                    fallback_post_url,
+                    json={"operatorId": "11xplay"},
+                    headers=post_headers,
                     timeout=aiohttp.ClientTimeout(total=4.0)
                 ) as resp:
                     if resp.status == 200:
@@ -478,17 +486,13 @@ class ExchangeScraperEngine:
                             if isinstance(data, list) and data:
                                 raw_data = data
                             elif isinstance(data, dict):
-                                m_list = (
-                                    data.get("matches") or data.get("data") or
-                                    data.get("result") or data.get("items") or
-                                    data.get("events") or data.get("gmarket") or []
-                                )
+                                m_list = data.get("matches") or data.get("data") or data.get("result") or data.get("items") or data.get("events") or []
                                 if isinstance(m_list, list) and m_list:
                                     raw_data = m_list
                         except Exception:
                             pass
             except Exception as e:
-                logger.debug(f"Catalog GET fallback notice ({CURRENT_CATALOG_URL}): {e}")
+                logger.debug(f"POST catalog fallback notice: {e}")
 
         # 3. If still empty, check MARKET_CACHE
         if not raw_data:
