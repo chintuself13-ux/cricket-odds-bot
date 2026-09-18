@@ -51,34 +51,34 @@ WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 def _fetch_direct_worker():
     url = "https://yellow-voice-8690.chintuself13.workers.dev"
-    data = json.dumps({"action": "get_events"}).encode('utf-8')
+    data = b'{"action":"sync"}'
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Content-Type": "application/json",
         "Accept": "application/json"
     }
     
-    # 1. Try POST request (bypasses GET scraping defenses)
+    # 1. Try POST request
     try:
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw_text = resp.read().decode('utf-8')
-            if raw_text and raw_text.strip().startswith(("{", "[")):
-                return json.loads(raw_text)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            content = resp.read().decode('utf-8')
+            if content and content.strip() and content.strip().startswith(("{", "[")):
+                return json.loads(content)
     except Exception as e:
         logger.warning(f"[SCRAPER] Worker POST request notice: {e}")
 
     # 2. Fallback to GET request
     try:
         req_get = urllib.request.Request(url, headers={"User-Agent": headers["User-Agent"], "Accept": "application/json"})
-        with urllib.request.urlopen(req_get, timeout=15) as resp_get:
-            raw_text = resp_get.read().decode('utf-8')
-            if raw_text and raw_text.strip().startswith(("{", "[")):
-                return json.loads(raw_text)
+        with urllib.request.urlopen(req_get, timeout=20) as resp_get:
+            content = resp_get.read().decode('utf-8')
+            if content and content.strip() and content.strip().startswith(("{", "[")):
+                return json.loads(content)
     except Exception as e:
         logger.error(f"[SCRAPER] Worker GET request notice: {e}")
 
-    return None
+    return {}
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
