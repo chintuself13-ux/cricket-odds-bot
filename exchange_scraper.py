@@ -51,14 +51,12 @@ WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches via Cloudflare Worker reverse proxy with realistic browser headers & fallbacks.
+    Fetches live cricket matches via Cloudflare Worker reverse proxy with text-first JSON parsing & fallbacks.
     """
     url = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://yellow-voice-8690.chintuself13.workers.dev"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "*/*"
     }
 
     payload = None
@@ -66,13 +64,14 @@ async def get_live_matches() -> List[Dict[str, Any]]:
     try:
         session = await global_exchange_scraper.get_aiohttp_session()
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status == 200:
-                payload = await resp.json(content_type=None)
+            raw_text = await resp.text()
+            if resp.status == 200 and raw_text and raw_text.strip().startswith(("{", "[")):
+                payload = json.loads(raw_text)
                 logger.info("[SCRAPER] Worker fetch success!")
             else:
-                logger.error(f"[SCRAPER] Cloudflare Worker returned status {resp.status}")
+                logger.error(f"[SCRAPER] Worker HTTP {resp.status}, body len: {len(raw_text) if raw_text else 0}")
     except Exception as e:
-        logger.error(f"[SCRAPER] Exception fetching from Cloudflare Worker: {e}")
+        logger.error(f"[SCRAPER] Worker fetch/parse error: {e}")
 
     # Fallback to secondary endpoints if primary Worker fails
     if not payload:
@@ -82,8 +81,9 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             try:
                 session = await global_exchange_scraper.get_aiohttp_session()
                 async with session.get(target_api, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    if resp.status == 200:
-                        payload = await resp.json(content_type=None)
+                    raw_text = await resp.text()
+                    if resp.status == 200 and raw_text and raw_text.strip().startswith(("{", "[")):
+                        payload = json.loads(raw_text)
                         logger.info(f"[SCRAPER] Fallback endpoint fetch success: {target_api}")
                         break
             except Exception as e:
@@ -99,7 +99,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
     if not isinstance(events, list):
         events = []
 
-    logger.info(f"[SCRAPER] Extracted {len(events)} total events from worker")
+    logger.info(f"[SCRAPER] Total events parsed: {len(events)}")
 
     real_matches = []
     seen_ids = set()
@@ -153,7 +153,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             "odds": []
         })
 
-    logger.info(f"[SCRAPER] Filtered Real Matches Found: {len(real_matches)}")
+    logger.info(f"[SCRAPER] Returning {len(real_matches)} valid cricket matches")
     return real_matches
 
 
