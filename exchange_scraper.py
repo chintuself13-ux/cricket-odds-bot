@@ -49,45 +49,31 @@ WS_TASK: Optional[asyncio.Task] = None
 WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
-def _fetch_worker_sync(target_url: str) -> Optional[dict]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*"
-    }
-    try:
-        req = urllib.request.Request(target_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=12) as response:
-            raw_text = response.read().decode('utf-8')
-            if raw_text and raw_text.strip().startswith(("{", "[")):
-                return json.loads(raw_text)
-    except Exception as e:
-        logger.warning(f"[SCRAPER] Sync urllib fetch notice for {target_url[:60]}: {e}")
-    return None
+def _fetch_worker_data():
+    worker_url = "https://yellow-voice-8690.chintuself13.workers.dev"
+    req = urllib.request.Request(
+        worker_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=15) as response:
+        return json.loads(response.read().decode('utf-8'))
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches via urllib.request in asyncio.to_thread from Cloudflare Worker proxy.
+    Fetches live cricket matches exclusively via Cloudflare Worker proxy.
     """
-    url = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://yellow-voice-8690.chintuself13.workers.dev"
-
-    payload = None
     try:
-        payload = await asyncio.to_thread(_fetch_worker_sync, url)
+        payload = await asyncio.to_thread(_fetch_worker_data)
     except Exception as e:
-        logger.error(f"[SCRAPER] Sync worker fetch error: {e}")
-
-    # Fallback to secondary endpoints if primary Worker fails
-    if not payload:
-        for target_api in DEFAULT_CATALOG_ENDPOINTS:
-            if target_api == url:
-                continue
-            payload = await asyncio.to_thread(_fetch_worker_sync, target_api)
-            if payload:
-                break
+        logger.error(f"[SCRAPER] Cloudflare Worker fetch error: {e}")
+        return []
 
     if not payload:
-        logger.error("[SCRAPER] All exchange endpoints and Cloudflare Worker sync fetch failed.")
+        logger.error("[SCRAPER] Empty payload returned from Cloudflare Worker.")
         return []
 
     data_block = payload.get("data") if isinstance(payload, dict) else {}
@@ -95,41 +81,34 @@ async def get_live_matches() -> List[Dict[str, Any]]:
     if not isinstance(events, list):
         events = []
 
-    logger.info(f"[SCRAPER] Total raw events: {len(events)}")
+    logger.info(f"[SCRAPER] Worker returned {len(events)} total events")
 
     real_matches = []
-    seen_ids = set()
+    seen = set()
 
     for item in events:
         if not isinstance(item, dict):
             continue
 
-        # Sirf wahi matches pick karo jisme bookmaker rate open ho (if field present)
-        if "bm_active" in item and item.get("bm_active") != 1 and item.get("bm_active") != "1":
+        # 4 = Cricket
+        if str(item.get("event_type_id", "")).strip() != "4":
             continue
 
-        # Filter Cricket
-        if str(item.get("event_type_id") or item.get("sports_id") or item.get("sport_id") or "").strip() != "4":
-            continue
-
-        name = item.get("name") or item.get("event_name") or item.get("title") or ""
-        name = name.strip()
-        competition = str(item.get("competition_name") or item.get("competition") or item.get("league") or "").strip().lower()
+        name = item.get("name", "").strip()
+        comp = item.get("competition_name", "").strip().lower()
         lower_name = name.lower()
 
-        # Must have team vs team
         if not (" v " in lower_name or " vs " in lower_name):
             continue
 
-        # Skip blocklisted keywords
-        if any(bad in lower_name for bad in BLOCKED_KEYWORDS) or any(bad in competition for bad in BLOCKED_KEYWORDS):
+        if any(b in lower_name for b in BLOCKED_KEYWORDS) or any(b in comp for b in BLOCKED_KEYWORDS):
             continue
 
-        m_id = str(item.get("market_id") or item.get("event_id") or item.get("id") or "").strip()
-        if not m_id or m_id in seen_ids:
+        m_id = str(item.get("market_id") or item.get("event_id") or "").strip()
+        if not m_id or m_id in seen:
             continue
 
-        seen_ids.add(m_id)
+        seen.add(m_id)
 
         parts = re.split(r'\s+(?:vs|v|-)\s+', name, flags=re.IGNORECASE)
         home_team = parts[0].strip() if len(parts) >= 2 else "Team 1"
@@ -147,7 +126,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             "odds": []
         })
 
-    logger.info(f"[SCRAPER] Filtered down to {len(real_matches)} valid cricket matches")
+    logger.info(f"[SCRAPER] Successfully parsed {len(real_matches)} matches")
     return real_matches
 
 
