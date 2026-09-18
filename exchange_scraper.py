@@ -100,24 +100,40 @@ class ExchangeScraper:
             "https://central.zplay1.in/pb/api/v1/events/matches/inplay",
             "https://central.zplay1.in/pb/api/v1/events/matches/4"
         ]
+        all_items = []
         for url in urls:
             try:
                 r = requests.get(url, headers=self.headers, timeout=12)
+                logger.info(f"[SCRAPER] Fetch {url} -> Status: {r.status_code}")
                 if r.status_code == 200:
                     data = r.json()
-                    if data:
-                        return data
+                    logger.info(f"[SCRAPER] Raw sample keys: {list(data.keys()) if isinstance(data, dict) else f'List of {len(data)} items'}")
+                    if isinstance(data, list):
+                        all_items.extend(data)
+                    elif isinstance(data, dict):
+                        items = []
+                        for key in ["data", "events", "matches", "result", "items"]:
+                            val = data.get(key)
+                            if isinstance(val, list):
+                                items = val
+                                break
+                            elif isinstance(val, dict):
+                                items = list(val.values())
+                                break
+                        if not items and "data" in data and isinstance(data["data"], dict):
+                            items = data["data"].get("events", []) or data["data"].get("matches", [])
+                        all_items.extend(items)
+                else:
+                    logger.warning(f"[SCRAPER] Bad status {r.status_code} response: {r.text[:200]}")
             except Exception as e:
-                logger.warning(f"[SCRAPER] Error from {url}: {e}")
-        return []
+                logger.error(f"[SCRAPER] Request failed for {url}: {e}")
+        return all_items
 
     async def get_live_matches(self):
         data = await asyncio.to_thread(self._fetch_fixtures_sync)
-        items = []
-        if isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            items = data.get("data") or data.get("events") or data.get("matches") or []
+        
+        items = data if isinstance(data, list) else []
+        logger.info(f"[SCRAPER] Total candidate match items: {len(items)}")
 
         real_matches = []
         seen = set()
@@ -130,7 +146,8 @@ class ExchangeScraper:
                 item.get("name") 
                 or item.get("eventName") 
                 or item.get("matchName") 
-                or item.get("event_name") 
+                or item.get("event_name")
+                or item.get("title")
                 or ""
             ).strip()
 
@@ -139,6 +156,8 @@ class ExchangeScraper:
                 or item.get("id") 
                 or item.get("marketId") 
                 or item.get("event_id") 
+                or item.get("gameId")
+                or item.get("matchId")
                 or ""
             ).strip()
 
@@ -146,7 +165,8 @@ class ExchangeScraper:
                 continue
 
             lower_name = name.lower()
-            if not (" v " in lower_name or " vs " in lower_name):
+            # Allow common separator patterns
+            if not (" v " in lower_name or " vs " in lower_name or " - " in lower_name):
                 continue
 
             if any(b in lower_name for b in BLOCKED_KEYWORDS):
