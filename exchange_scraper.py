@@ -24,13 +24,14 @@ CURRENT_EXCHANGE_URL = os.getenv("EXCHANGE_URL", DEFAULT_DOMAIN).rstrip("/")
 BASE_URL = CURRENT_EXCHANGE_URL
 BASE_EXCHANGE_URL = CURRENT_EXCHANGE_URL
 
-DEFAULT_CATALOG_URL = "https://api.cricbet99.click/api/guest/event_list"
+DEFAULT_CATALOG_URL = "https://yellow-voice-8690.chintuself13.workers.dev"
 CURRENT_CATALOG_URL = os.getenv("CATALOG_URL", DEFAULT_CATALOG_URL)
 
-DEFAULT_ODDS_URL = "https://odd.ocric99.com/ws/getMarketDataNew"
+DEFAULT_ODDS_URL = "https://odd.ocric99.com"
 CURRENT_ODDS_URL = os.getenv("ODDS_URL", DEFAULT_ODDS_URL)
 
 DEFAULT_CATALOG_ENDPOINTS = [
+    "https://yellow-voice-8690.chintuself13.workers.dev",
     "https://api.reddybook.club/api/guest/event_list",
     "https://api.reddybook.art/api/guest/event_list",
     "https://api.cricbet99.win/api/guest/event_list",
@@ -45,85 +46,49 @@ BLOCKED_KEYWORDS = [
 MARKET_CACHE: Dict[str, Dict[str, Any]] = {}
 MARKET_CACHE_LOCK = asyncio.Lock()
 WS_TASK: Optional[asyncio.Task] = None
-WS_URL = CURRENT_ODDS_URL.replace("https://", "wss://").replace("http://", "ws://")
+WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches from active exchange endpoints with multi-domain failover & curl_cffi support.
+    Fetches live cricket matches via Cloudflare Worker reverse proxy with fallback to secondary endpoints.
     """
-    endpoints = list(DEFAULT_CATALOG_ENDPOINTS)
-    if CURRENT_CATALOG_URL and CURRENT_CATALOG_URL not in endpoints:
-        endpoints.insert(0, CURRENT_CATALOG_URL)
-
+    url = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://yellow-voice-8690.chintuself13.workers.dev"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://reddybook.club",
-        "Referer": "https://reddybook.club/",
-        "Accept-Language": "en-US,en;q=0.9"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
     }
 
     payload = None
 
-    for target_api in endpoints:
-        # 1. Try via curl_cffi with Chrome impersonation if available
-        if HAS_CURL_CFFI and AsyncSession is not None:
-            try:
-                logger.info(f"[SCRAPER] Trying exchange endpoint via curl_cffi: {target_api}")
-                async with AsyncSession(impersonate="chrome124") as s:
-                    res = await s.get(target_api, headers=headers, timeout=10)
-                    if res.status_code == 200:
-                        payload = res.json()
-                        logger.info(f"[SCRAPER] Success from endpoint via curl_cffi: {target_api}")
-                        break
-                    else:
-                        logger.warning(f"[SCRAPER] Endpoint {target_api} returned HTTP status {res.status_code}")
-            except Exception as e:
-                logger.warning(f"[SCRAPER] Exception fetching via curl_cffi ({target_api}): {e}")
+    try:
+        session = await global_exchange_scraper.get_aiohttp_session()
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 200:
+                payload = await resp.json()
+                logger.info("[SCRAPER] Worker fetch success!")
+            else:
+                logger.error(f"[SCRAPER] Cloudflare Worker returned status {resp.status}")
+    except Exception as e:
+        logger.error(f"[SCRAPER] Exception fetching from Cloudflare Worker: {e}")
 
-        # 2. Try via aiohttp standard session as fallback
-        if not payload:
+    # Fallback to secondary endpoints if primary Worker fails
+    if not payload:
+        for target_api in DEFAULT_CATALOG_ENDPOINTS:
+            if target_api == url:
+                continue
             try:
                 session = await global_exchange_scraper.get_aiohttp_session()
-                logger.info(f"[SCRAPER] Trying exchange endpoint via aiohttp: {target_api}")
-                async with session.get(target_api, headers=headers, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
+                async with session.get(target_api, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status == 200:
-                        text = await resp.text()
-                        if text and text.strip().startswith(("{", "[")):
-                            payload = json.loads(text)
-                            logger.info(f"[SCRAPER] Success from endpoint via aiohttp: {target_api}")
-                            break
-                    else:
-                        logger.warning(f"[SCRAPER] Endpoint {target_api} returned HTTP status {resp.status}")
+                        payload = await resp.json()
+                        logger.info(f"[SCRAPER] Fallback endpoint fetch success: {target_api}")
+                        break
             except Exception as e:
-                logger.warning(f"[SCRAPER] Exception fetching via aiohttp ({target_api}): {e}")
-
-        # 3. Try via open CORS proxies as secondary fallback
-        if not payload:
-            try:
-                encoded_target = urllib.parse.quote(target_api, safe="")
-                proxy_urls = [
-                    f"https://api.allorigins.win/raw?url={encoded_target}",
-                    f"https://corsproxy.io/?{encoded_target}"
-                ]
-                session = await global_exchange_scraper.get_aiohttp_session()
-                for proxy_url in proxy_urls:
-                    async with session.get(proxy_url, headers=headers, timeout=aiohttp.ClientTimeout(total=8.0)) as resp:
-                        if resp.status == 200:
-                            text = await resp.text()
-                            if text and text.strip().startswith(("{", "[")):
-                                payload = json.loads(text)
-                                logger.info(f"[SCRAPER] Success from endpoint via proxy: {proxy_url[:60]}")
-                                break
-            except Exception:
-                pass
-
-        if payload:
-            break
+                logger.warning(f"[SCRAPER] Fallback endpoint {target_api} error: {e}")
 
     if not payload:
-        logger.error("[SCRAPER] All exchange endpoints failed or returned empty payload.")
+        logger.error("[SCRAPER] All exchange endpoints and Cloudflare Worker failed.")
         return []
 
     events = payload.get("data", {}).get("events", []) if isinstance(payload, dict) else []
