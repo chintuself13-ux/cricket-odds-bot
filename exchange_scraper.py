@@ -53,11 +53,18 @@ WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 def _fetch_from_worker():
     url = "https://yellow-voice-8690.chintuself13.workers.dev/"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept": "application/json"
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    r = requests.get(url, headers=headers, timeout=20)
-    return r.json()
+    if HAS_CURL_CFFI:
+        from curl_cffi import requests as cffi_requests
+        r = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=20)
+        logger.info(f"[SCRAPER] Worker HTTP status: {r.status_code}, length: {len(r.text)}")
+        return r.json()
+    else:
+        r = requests.get(url, headers=headers, timeout=20)
+        logger.info(f"[SCRAPER] Worker HTTP status: {r.status_code}, length: {len(r.text)}")
+        return r.json()
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
