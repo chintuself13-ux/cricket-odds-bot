@@ -50,48 +50,33 @@ WS_TASK: Optional[asyncio.Task] = None
 WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
-def _fetch_live_odds_feed():
-    mirrors = [
-        "https://api.betbhai9.com/api/guest/event_list",
-        "https://api.skyfair.vip/api/guest/event_list",
-        "https://api.laser247.today/api/guest/event_list",
-        "https://yellow-voice-8690.chintuself13.workers.dev/"
-    ]
+def _fetch_verified_worker():
+    url = "https://yellow-voice-8690.chintuself13.workers.dev/"
     headers = {
-        "Accept": "application/json, text/plain, */*",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "application/json"
     }
-
-    for url in mirrors:
-        try:
-            if HAS_CURL_CFFI:
-                from curl_cffi import requests as cffi_requests
-                r = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=8)
-                if r.status_code == 200 and r.text.strip().startswith(("{", "[")):
-                    return json.loads(r.text)
-            else:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    raw_text = resp.read().decode('utf-8')
-                    if raw_text and raw_text.strip().startswith(("{", "[")):
-                        return json.loads(raw_text)
-        except Exception:
-            continue
-    return {}
+    if requests is not None:
+        r = requests.get(url, headers=headers, timeout=15)
+        return r.json()
+    else:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode('utf-8'))
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches using active bookmaker exchange mirrors.
+    Fetches live cricket matches from verified Cloudflare Worker.
     """
     try:
-        payload = await asyncio.to_thread(_fetch_live_odds_feed)
+        payload = await asyncio.to_thread(_fetch_verified_worker)
     except Exception as e:
-        logger.error(f"[SCRAPER] All exchange mirrors failed: {e}")
+        logger.error(f"[SCRAPER] Worker fetch failed: {e}")
         return []
 
     if not payload or not isinstance(payload, dict):
-        logger.error("[SCRAPER] Empty payload returned from active mirrors.")
+        logger.error("[SCRAPER] Empty or invalid payload from worker.")
         return []
 
     data_block = payload.get("data", {}) if isinstance(payload, dict) else {}
@@ -99,7 +84,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
     if not isinstance(events, list):
         events = []
 
-    logger.info(f"[SCRAPER] Successfully received {len(events)} events from active mirror")
+    logger.info(f"[SCRAPER] Received {len(events)} events from worker")
 
     real_matches = []
     seen = set()
@@ -108,6 +93,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
 
+        # Match type cricket (4)
         if str(item.get("event_type_id", "")).strip() != "4":
             continue
 
@@ -143,7 +129,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             "odds": []
         })
 
-    logger.info(f"[SCRAPER] Returning {len(real_matches)} valid cricket matches")
+    logger.info(f"[SCRAPER] Filtered live matches: {len(real_matches)}")
     return real_matches
 
 
