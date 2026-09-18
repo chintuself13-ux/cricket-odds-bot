@@ -49,53 +49,45 @@ WS_TASK: Optional[asyncio.Task] = None
 WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
+def _fetch_worker_sync(target_url: str) -> Optional[dict]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*"
+    }
+    try:
+        req = urllib.request.Request(target_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as response:
+            raw_text = response.read().decode('utf-8')
+            if raw_text and raw_text.strip().startswith(("{", "[")):
+                return json.loads(raw_text)
+    except Exception as e:
+        logger.warning(f"[SCRAPER] Sync urllib fetch notice for {target_url[:60]}: {e}")
+    return None
+
+
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches via Cloudflare Worker reverse proxy matching worker JSON structure.
+    Fetches live cricket matches via urllib.request in asyncio.to_thread from Cloudflare Worker proxy.
     """
     url = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://yellow-voice-8690.chintuself13.workers.dev"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "*/*"
-    }
 
     payload = None
-
     try:
-        session = await global_exchange_scraper.get_aiohttp_session()
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status != 200:
-                logger.error(f"[SCRAPER] Worker HTTP {resp.status}")
-                return []
-            raw_text = await resp.text()
-            if raw_text and raw_text.strip().startswith(("{", "[")):
-                payload = json.loads(raw_text)
-            else:
-                logger.error(f"[SCRAPER] Non-JSON payload received from worker (len: {len(raw_text) if raw_text else 0})")
-                return []
+        payload = await asyncio.to_thread(_fetch_worker_sync, url)
     except Exception as e:
-        logger.error(f"[SCRAPER] Error reading worker: {e}")
-        return []
+        logger.error(f"[SCRAPER] Sync worker fetch error: {e}")
 
     # Fallback to secondary endpoints if primary Worker fails
     if not payload:
         for target_api in DEFAULT_CATALOG_ENDPOINTS:
             if target_api == url:
                 continue
-            try:
-                session = await global_exchange_scraper.get_aiohttp_session()
-                async with session.get(target_api, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    if resp.status == 200:
-                        raw_text = await resp.text()
-                        if raw_text and raw_text.strip().startswith(("{", "[")):
-                            payload = json.loads(raw_text)
-                            logger.info(f"[SCRAPER] Fallback endpoint fetch success: {target_api}")
-                            break
-            except Exception as e:
-                logger.warning(f"[SCRAPER] Fallback endpoint {target_api} error: {e}")
+            payload = await asyncio.to_thread(_fetch_worker_sync, target_api)
+            if payload:
+                break
 
     if not payload:
-        logger.error("[SCRAPER] All exchange endpoints and Cloudflare Worker failed.")
+        logger.error("[SCRAPER] All exchange endpoints and Cloudflare Worker sync fetch failed.")
         return []
 
     data_block = payload.get("data") if isinstance(payload, dict) else {}
