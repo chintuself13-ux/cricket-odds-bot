@@ -36,26 +36,44 @@ WS_URL = CURRENT_ODDS_URL.replace("https://", "wss://").replace("http://", "ws:/
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches directly from Cricbet99 event list feed with strict SRL/Virtual exclusion.
-    URL: https://api.cricbet99.click/api/guest/event_list
+    Fetches live cricket matches from Cricbet99 event list feed using open proxies to bypass Cloudflare 403 on Render.
     """
-    url = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://api.cricbet99.click/api/guest/event_list"
+    raw_target = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://api.cricbet99.click/api/guest/event_list"
+    encoded_target = urllib.parse.quote(raw_target, safe="")
+
+    proxy_urls = [
+        f"https://api.allorigins.win/raw?url={encoded_target}",
+        f"https://corsproxy.io/?{encoded_target}",
+        raw_target
+    ]
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
-        "Origin": CURRENT_EXCHANGE_URL if CURRENT_EXCHANGE_URL else "https://reddybook.info",
-        "Referer": f"{CURRENT_EXCHANGE_URL.rstrip('/')}/" if CURRENT_EXCHANGE_URL else "https://reddybook.info/"
+        "Origin": "https://reddybook.info",
+        "Referer": "https://reddybook.info/"
     }
 
-    try:
-        session = await global_exchange_scraper.get_aiohttp_session()
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
-            if resp.status != 200:
-                logger.error(f"[SCRAPER] Cricbet API returned HTTP status {resp.status}")
-                return []
-            payload = await resp.json(content_type=None)
-    except Exception as e:
-        logger.error(f"[SCRAPER] Cricbet request failed with exception: {e}")
+    payload = None
+    session = await global_exchange_scraper.get_aiohttp_session()
+
+    for url in proxy_urls:
+        try:
+            logger.info(f"[SCRAPER] Attempting Cricbet event list fetch via: {url[:80]}...")
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    if text and text.strip().startswith(("{", "[")):
+                        payload = json.loads(text)
+                        logger.info(f"[SCRAPER] Successfully fetched event list via {url[:60]}")
+                        break
+                else:
+                    logger.warning(f"[SCRAPER] Endpoint {url[:60]} returned HTTP status {resp.status}")
+        except Exception as e:
+            logger.warning(f"[SCRAPER] Exception fetching via endpoint {url[:60]}: {e}")
+
+    if not payload:
+        logger.error("[SCRAPER] Failed to fetch live matches from all proxy and direct endpoints.")
         return []
 
     events = payload.get("data", {}).get("events", []) if isinstance(payload, dict) else []
