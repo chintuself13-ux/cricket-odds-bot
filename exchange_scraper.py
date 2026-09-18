@@ -27,6 +27,9 @@ BASE_EXCHANGE_URL = CURRENT_EXCHANGE_URL
 DEFAULT_CATALOG_URL = "https://api.cricbet99.click/api/guest/event_list"
 CURRENT_CATALOG_URL = os.getenv("CATALOG_URL", DEFAULT_CATALOG_URL)
 
+DEFAULT_ODDS_URL = "https://odd.ocric99.com/ws/getMarketDataNew"
+CURRENT_ODDS_URL = os.getenv("ODDS_URL", DEFAULT_ODDS_URL)
+
 DEFAULT_CATALOG_ENDPOINTS = [
     "https://api.cricbet99.click/api/guest/event_list",
     "https://api.reddybook.club/api/guest/event_list",
