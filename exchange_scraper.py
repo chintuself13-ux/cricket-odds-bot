@@ -1,22 +1,11 @@
 import asyncio
 import logging
 import re
-
-try:
-    from curl_cffi import requests as c_requests
-    USE_CURL = True
-except ImportError:
-    import requests as c_requests
-    USE_CURL = False
+import requests
 
 logger = logging.getLogger(__name__)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Origin": "https://shubhlabh777.live",
-    "Referer": "https://shubhlabh777.live/"
-}
+WORKER_BASE = "https://yellow-voice-8690.chintuself13.workers.dev"
 
 BLOCKED_KEYWORDS = ["t10", "simulated", "srl", "virtual", "cyber", "electronic"]
 
@@ -24,16 +13,10 @@ DEFAULT_DOMAIN = "https://central.zplay1.in"
 CURRENT_EXCHANGE_URL = DEFAULT_DOMAIN
 BASE_URL = DEFAULT_DOMAIN
 BASE_EXCHANGE_URL = DEFAULT_DOMAIN
-DEFAULT_CATALOG_URL = DEFAULT_DOMAIN
-CURRENT_CATALOG_URL = DEFAULT_DOMAIN
+DEFAULT_CATALOG_URL = WORKER_BASE
+CURRENT_CATALOG_URL = WORKER_BASE
 DEFAULT_ODDS_URL = DEFAULT_DOMAIN
 CURRENT_ODDS_URL = DEFAULT_DOMAIN
-
-def _get(url):
-    kwargs = {"headers": HEADERS, "timeout": 15}
-    if USE_CURL:
-        kwargs["impersonate"] = "chrome120"
-    return c_requests.get(url, **kwargs)
 
 def set_exchange_url(new_url: str) -> str:
     global CURRENT_EXCHANGE_URL, BASE_URL, BASE_EXCHANGE_URL
@@ -80,15 +63,12 @@ def is_team_match(name1: str, name2: str) -> bool:
 def format_indian_odds(price):
     try:
         val = float(price)
-        if val <= 1.0:
-            return "0"
-        return f"{val:.2f}"
+        return f"{val:.2f}" if val > 1.0 else "0"
     except Exception:
         return str(price)
 
 class ExchangeScraper:
     def __init__(self):
-        self.headers = HEADERS
         self.manual_overrides = {}
 
     def _clean_team_name(self, name: str) -> str:
@@ -107,45 +87,47 @@ class ExchangeScraper:
     async def close_async(self):
         pass
 
+    def _fetch_from_worker(self, endpoint_path: str):
+        url = f"{WORKER_BASE}{endpoint_path}"
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200 and r.text.strip():
+                return r.json()
+            logger.warning(f"[SCRAPER] Proxy returned status {r.status_code} for {endpoint_path}")
+        except Exception as e:
+            logger.error(f"[SCRAPER] Proxy fetch failed for {endpoint_path}: {e}")
+        return None
+
     def _fetch_fixtures_sync(self):
-        urls = [
-            "https://central.zplay1.in/pb/api/v1/events/matches/4",
-            "https://central.zplay1.in/pb/api/v1/events/matches/inplay"
+        paths = [
+            "/pb/api/v1/events/matches/4",
+            "/pb/api/v1/events/matches/inplay"
         ]
         all_items = []
-        for url in urls:
-            try:
-                r = _get(url)
-                logger.info(f"[SCRAPER] Fetch {url} -> Status: {r.status_code}")
-                if r.status_code == 200:
-                    data = r.json()
-                    logger.info(f"[SCRAPER] Raw sample keys: {list(data.keys()) if isinstance(data, dict) else f'List of {len(data)} items'}")
-                    if isinstance(data, list):
-                        all_items.extend(data)
-                    elif isinstance(data, dict):
-                        items = []
-                        for key in ["data", "events", "matches", "result", "items"]:
-                            val = data.get(key)
-                            if isinstance(val, list):
-                                items = val
-                                break
-                            elif isinstance(val, dict):
-                                items = list(val.values())
-                                break
-                        if not items and "data" in data and isinstance(data["data"], dict):
-                            items = data["data"].get("events", []) or data["data"].get("matches", [])
-                        all_items.extend(items)
-                else:
-                    logger.warning(f"[SCRAPER] {url} returned status {r.status_code}: {r.text[:200]}")
-            except Exception as e:
-                logger.error(f"[SCRAPER] Request failed for {url}: {e}")
+        for path in paths:
+            data = self._fetch_from_worker(path)
+            if data:
+                items = []
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    for key in ["data", "events", "matches", "result", "items"]:
+                        val = data.get(key)
+                        if isinstance(val, list):
+                            items = val
+                            break
+                        elif isinstance(val, dict):
+                            items = list(val.values())
+                            break
+                    if not items and "data" in data and isinstance(data["data"], dict):
+                        items = data["data"].get("events", []) or data["data"].get("matches", [])
+                all_items.extend(items)
         return all_items
 
     async def get_live_matches(self):
         data = await asyncio.to_thread(self._fetch_fixtures_sync)
-        
         items = data if isinstance(data, list) else []
-        logger.info(f"[SCRAPER] Total candidate match items: {len(items)}")
+        logger.info(f"[SCRAPER] Fixture candidates: {len(items)}")
 
         real_matches = []
         seen = set()
@@ -192,7 +174,7 @@ class ExchangeScraper:
                 "title": name
             })
 
-        logger.info(f"[SCRAPER] Live cricket matches found: {len(real_matches)}")
+        logger.info(f"[SCRAPER] Ready matches: {len(real_matches)}")
         return real_matches
 
     async def fetch_live_matches_async(self):
@@ -205,16 +187,8 @@ class ExchangeScraper:
             return []
 
     def _fetch_odds_sync(self, match_id: str):
-        url = f"https://central.zplay1.in/pb/api/v1/events/matchDetails/{match_id}"
-        try:
-            r = _get(url)
-            if r.status_code == 200:
-                return r.json()
-            else:
-                logger.warning(f"[SCRAPER] Odds fetch for {match_id} returned status {r.status_code}")
-        except Exception as e:
-            logger.error(f"[SCRAPER] Match details fetch error for {match_id}: {e}")
-        return None
+        path = f"/pb/api/v1/events/matchDetails/{match_id}"
+        return self._fetch_from_worker(path)
 
     async def get_match_odds(self, match_id: str):
         return await asyncio.to_thread(self._fetch_odds_sync, match_id)
