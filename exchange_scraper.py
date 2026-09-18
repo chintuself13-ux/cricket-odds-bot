@@ -49,43 +49,59 @@ WS_TASK: Optional[asyncio.Task] = None
 WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
-def _fetch_direct_exchange():
-    url = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL and "cricbet" in CURRENT_CATALOG_URL else "https://api.cricbet99.click/api/guest/event_list"
+def _fetch_active_exchange():
+    endpoints = [
+        "https://api.laser247.com/api/v1/guest/event_list",
+        "https://api.diamondexch99.com/api/v1/guest/event_list",
+        "https://api.cricbet99.click/api/guest/event_list",
+        "https://api.reddybook.club/api/guest/event_list"
+    ]
     headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
-        "Origin": "https://reddybook.club",
-        "Referer": "https://reddybook.club/"
+        "Referer": "https://laser247.com/"
     }
-    if HAS_CURL_CFFI:
-        from curl_cffi import requests as cffi_requests
-        r = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
-        return r.json()
-    else:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode('utf-8'))
+
+    for url in endpoints:
+        try:
+            if HAS_CURL_CFFI:
+                from curl_cffi import requests as cffi_requests
+                r = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data:
+                        return data
+            else:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    raw_text = resp.read().decode('utf-8')
+                    if raw_text and raw_text.strip().startswith(("{", "[")):
+                        data = json.loads(raw_text)
+                        if data:
+                            return data
+        except Exception:
+            continue
+    return {}
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches directly using curl_cffi Chrome 120 TLS impersonation.
+    Fetches live cricket matches using active Laser247 / Diamond / Cricbet exchange endpoints.
     """
     try:
-        payload = await asyncio.to_thread(_fetch_direct_exchange)
+        payload = await asyncio.to_thread(_fetch_active_exchange)
     except Exception as e:
-        logger.error(f"[SCRAPER] Direct exchange fetch failed: {e}")
+        logger.error(f"[SCRAPER] Exchange mirror fetch failed: {e}")
         return []
 
     if not payload or not isinstance(payload, dict):
-        logger.error("[SCRAPER] Empty or invalid payload from direct exchange.")
+        logger.error("[SCRAPER] Empty payload returned from exchange mirrors.")
         return []
 
-    data_block = payload.get("data") if isinstance(payload, dict) else {}
+    data_block = payload.get("data", {}) if isinstance(payload, dict) else {}
     events = data_block.get("events", []) if isinstance(data_block, dict) else payload.get("events", [])
     if not isinstance(events, list):
         events = []
-
-    logger.info(f"[SCRAPER] Total events parsed: {len(events)}")
 
     real_matches = []
     seen = set()
@@ -129,7 +145,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             "odds": []
         })
 
-    logger.info(f"[SCRAPER] Returning {len(real_matches)} valid cricket matches")
+    logger.info(f"[SCRAPER] Returning {len(real_matches)} valid exchange matches")
     return real_matches
 
 
