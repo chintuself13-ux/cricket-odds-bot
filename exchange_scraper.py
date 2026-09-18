@@ -52,22 +52,18 @@ WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 def _fetch_verified_worker():
     url = "https://yellow-voice-8690.chintuself13.workers.dev/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-    }
     if requests is not None:
-        r = requests.get(url, headers=headers, timeout=15)
+        r = requests.get(url, timeout=20)
         return r.json()
     else:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=20) as resp:
             return json.loads(resp.read().decode('utf-8'))
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches from verified Cloudflare Worker.
+    Fetches live cricket matches from verified Cloudflare Worker with flexible event extraction.
     """
     try:
         payload = await asyncio.to_thread(_fetch_verified_worker)
@@ -75,16 +71,22 @@ async def get_live_matches() -> List[Dict[str, Any]]:
         logger.error(f"[SCRAPER] Worker fetch failed: {e}")
         return []
 
-    if not payload or not isinstance(payload, dict):
-        logger.error("[SCRAPER] Empty or invalid payload from worker.")
-        return []
+    # Extract events array irrespective of wrapping
+    events = []
+    if isinstance(payload, dict):
+        if "data" in payload and isinstance(payload["data"], dict):
+            events = payload["data"].get("events", [])
+        elif "events" in payload:
+            events = payload.get("events", [])
+        elif "data" in payload and isinstance(payload["data"], list):
+            events = payload["data"]
+    elif isinstance(payload, list):
+        events = payload
 
-    data_block = payload.get("data", {}) if isinstance(payload, dict) else {}
-    events = data_block.get("events", []) if isinstance(data_block, dict) else payload.get("events", [])
     if not isinstance(events, list):
         events = []
 
-    logger.info(f"[SCRAPER] Received {len(events)} events from worker")
+    logger.info(f"[SCRAPER] Raw events extracted: {len(events)}")
 
     real_matches = []
     seen = set()
@@ -93,7 +95,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
 
-        # Match type cricket (4)
+        # 4 = Cricket
         if str(item.get("event_type_id", "")).strip() != "4":
             continue
 
@@ -129,7 +131,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             "odds": []
         })
 
-    logger.info(f"[SCRAPER] Filtered live matches: {len(real_matches)}")
+    logger.info(f"[SCRAPER] Total cricket matches ready: {len(real_matches)}")
     return real_matches
 
 
