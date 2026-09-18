@@ -49,46 +49,50 @@ WS_TASK: Optional[asyncio.Task] = None
 WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
-def _fetch_worker_data():
-    target = "https://yellow-voice-8690.chintuself13.workers.dev"
-    proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(target)}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
+def _fetch_direct_worker():
+    url = "https://yellow-voice-8690.chintuself13.workers.dev"
+    data = json.dumps({"action": "get_events"}).encode('utf-8')
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    # 1. Try POST request (bypasses GET scraping defenses)
     try:
-        req = urllib.request.Request(proxy_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=20) as response:
-            wrapper = json.loads(response.read().decode('utf-8'))
-            raw_contents = wrapper.get("contents", "")
-            if raw_contents and raw_contents.strip().startswith(("{", "[")):
-                return json.loads(raw_contents)
-    except Exception as e:
-        logger.warning(f"[SCRAPER] AllOrigins proxy fetch notice: {e}")
-
-    # Fallback to direct worker request
-    try:
-        req_direct = urllib.request.Request(target, headers=headers)
-        with urllib.request.urlopen(req_direct, timeout=15) as resp_direct:
-            raw_text = resp_direct.read().decode('utf-8')
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw_text = resp.read().decode('utf-8')
             if raw_text and raw_text.strip().startswith(("{", "[")):
                 return json.loads(raw_text)
     except Exception as e:
-        logger.error(f"[SCRAPER] Direct worker fetch error: {e}")
+        logger.warning(f"[SCRAPER] Worker POST request notice: {e}")
+
+    # 2. Fallback to GET request
+    try:
+        req_get = urllib.request.Request(url, headers={"User-Agent": headers["User-Agent"], "Accept": "application/json"})
+        with urllib.request.urlopen(req_get, timeout=15) as resp_get:
+            raw_text = resp_get.read().decode('utf-8')
+            if raw_text and raw_text.strip().startswith(("{", "[")):
+                return json.loads(raw_text)
+    except Exception as e:
+        logger.error(f"[SCRAPER] Worker GET request notice: {e}")
 
     return None
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches exclusively via Cloudflare Worker proxy.
+    Fetches live cricket matches directly via Cloudflare Worker POST request.
     """
     try:
-        payload = await asyncio.to_thread(_fetch_worker_data)
+        payload = await asyncio.to_thread(_fetch_direct_worker)
     except Exception as e:
-        logger.error(f"[SCRAPER] Cloudflare Worker fetch error: {e}")
+        logger.error(f"[SCRAPER] Direct worker error: {e}")
         return []
 
     if not payload:
-        logger.error("[SCRAPER] Empty payload returned from Cloudflare Worker.")
+        logger.error("[SCRAPER] Empty payload returned from direct worker request.")
         return []
 
     data_block = payload.get("data") if isinstance(payload, dict) else {}
@@ -96,7 +100,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
     if not isinstance(events, list):
         events = []
 
-    logger.info(f"[SCRAPER] Worker returned {len(events)} total events")
+    logger.info(f"[SCRAPER] Events received: {len(events)}")
 
     real_matches = []
     seen = set()
@@ -105,7 +109,6 @@ async def get_live_matches() -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
 
-        # 4 = Cricket
         if str(item.get("event_type_id", "")).strip() != "4":
             continue
 
@@ -141,7 +144,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             "odds": []
         })
 
-    logger.info(f"[SCRAPER] Successfully parsed {len(real_matches)} matches")
+    logger.info(f"[SCRAPER] Final match count: {len(real_matches)}")
     return real_matches
 
 
