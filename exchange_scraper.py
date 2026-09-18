@@ -31,10 +31,10 @@ DEFAULT_ODDS_URL = "https://odd.ocric99.com/ws/getMarketDataNew"
 CURRENT_ODDS_URL = os.getenv("ODDS_URL", DEFAULT_ODDS_URL)
 
 DEFAULT_CATALOG_ENDPOINTS = [
-    "https://api.cricbet99.click/api/guest/event_list",
     "https://api.reddybook.club/api/guest/event_list",
-    "https://skyexchange.art/api/v1/event_list",
-    "https://api.gold365.art/api/guest/event_list"
+    "https://api.reddybook.art/api/guest/event_list",
+    "https://api.cricbet99.win/api/guest/event_list",
+    "https://odds.cricketbet9.com/api/guest/event_list"
 ]
 
 BLOCKED_KEYWORDS = [
