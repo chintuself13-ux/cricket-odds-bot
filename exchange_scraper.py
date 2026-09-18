@@ -8,6 +8,7 @@ import threading
 import logging
 import asyncio
 import aiohttp
+import requests
 from typing import Dict, List, Any, Optional, Tuple
 
 try:
@@ -49,59 +50,32 @@ WS_TASK: Optional[asyncio.Task] = None
 WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
-def _fetch_active_exchange():
-    endpoints = [
-        "https://api.laser247.com/api/v1/guest/event_list",
-        "https://api.diamondexch99.com/api/v1/guest/event_list",
-        "https://api.cricbet99.click/api/guest/event_list",
-        "https://api.reddybook.club/api/guest/event_list"
-    ]
+def _fetch_from_worker():
+    url = "https://yellow-voice-8690.chintuself13.workers.dev/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://laser247.com/"
+        "Accept": "application/json"
     }
-
-    for url in endpoints:
-        try:
-            if HAS_CURL_CFFI:
-                from curl_cffi import requests as cffi_requests
-                r = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=10)
-                if r.status_code == 200:
-                    data = r.json()
-                    if data:
-                        return data
-            else:
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    raw_text = resp.read().decode('utf-8')
-                    if raw_text and raw_text.strip().startswith(("{", "[")):
-                        data = json.loads(raw_text)
-                        if data:
-                            return data
-        except Exception:
-            continue
-    return {}
+    r = requests.get(url, headers=headers, timeout=20)
+    return r.json()
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches using active Laser247 / Diamond / Cricbet exchange endpoints.
+    Fetches live cricket matches via requests from verified worker.
     """
     try:
-        payload = await asyncio.to_thread(_fetch_active_exchange)
+        payload = await asyncio.to_thread(_fetch_from_worker)
     except Exception as e:
-        logger.error(f"[SCRAPER] Exchange mirror fetch failed: {e}")
-        return []
-
-    if not payload or not isinstance(payload, dict):
-        logger.error("[SCRAPER] Empty payload returned from exchange mirrors.")
+        logger.error(f"[SCRAPER] Worker fetch failed: {e}")
         return []
 
     data_block = payload.get("data", {}) if isinstance(payload, dict) else {}
     events = data_block.get("events", []) if isinstance(data_block, dict) else payload.get("events", [])
     if not isinstance(events, list):
         events = []
+
+    logger.info(f"[SCRAPER] Total events in stream: {len(events)}")
 
     real_matches = []
     seen = set()
@@ -145,7 +119,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             "odds": []
         })
 
-    logger.info(f"[SCRAPER] Returning {len(real_matches)} valid exchange matches")
+    logger.info(f"[SCRAPER] Returning {len(real_matches)} valid cricket matches")
     return real_matches
 
 
