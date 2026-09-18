@@ -15,6 +15,35 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List, Tuple
 
 try:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+except ImportError:
+    class InlineKeyboardButton:
+        def __init__(self, text: str, callback_data: Optional[str] = None):
+            self.text = text
+            self.callback_data = callback_data
+
+        def to_dict(self):
+            return {"text": self.text, "callback_data": self.callback_data}
+
+    class InlineKeyboardMarkup:
+        def __init__(self, inline_keyboard: list):
+            self.inline_keyboard = inline_keyboard
+
+        def to_dict(self):
+            keyboard_rows = []
+            for row in self.inline_keyboard:
+                row_items = []
+                for b in row:
+                    if hasattr(b, "to_dict"):
+                        row_items.append(b.to_dict())
+                    elif isinstance(b, dict):
+                        row_items.append(b)
+                    else:
+                        row_items.append(b)
+                keyboard_rows.append(row_items)
+            return {"inline_keyboard": keyboard_rows}
+
+try:
     import pymongo
     HAS_PYMONGO = True
 except ImportError:
@@ -146,7 +175,10 @@ class TelegramBotClient:
             "disable_notification": disable_notification
         }
         if reply_markup:
-            payload["reply_markup"] = reply_markup
+            if hasattr(reply_markup, "to_dict"):
+                payload["reply_markup"] = reply_markup.to_dict()
+            else:
+                payload["reply_markup"] = reply_markup
 
         return self._make_request("sendMessage", json_payload=payload)
 
@@ -721,10 +753,14 @@ class TelegramOddsBot:
                     asyncio.create_task(self._cmd_stop_async(chat_id, []))
                 return
 
-            if cb_data.startswith("match:"):
+            if cb_data.startswith("match:") or cb_data.startswith("match_"):
                 try:
-                    match_idx = int(cb_data.split(":")[1])
-                    asyncio.create_task(self._handle_match_click_async(chat_id, user_id, match_idx, cb_id))
+                    raw_id = cb_data.split(":", 1)[1] if ":" in cb_data else cb_data.split("_", 1)[1]
+                    if raw_id.isdigit() and int(raw_id) < 1000:
+                        match_idx = int(raw_id)
+                        asyncio.create_task(self._handle_match_click_async(chat_id, user_id, match_idx, cb_id))
+                    else:
+                        asyncio.create_task(self._handle_match_click_by_id_async(chat_id, user_id, raw_id, cb_id))
                 except (IndexError, ValueError) as e:
                     logger.warning(f"Invalid match callback data ({cb_data}): {e}")
                 return
@@ -1287,6 +1323,18 @@ class TelegramOddsBot:
             "Tap any live match below to select a team and set target odd:"
         )
         await asyncio.to_thread(self.client.send_message, chat_id, msg_text, "HTML", False, reply_markup)
+
+    async def _handle_match_click_by_id_async(self, chat_id: str | int, user_id: int, match_id: str, cb_id: str):
+        if cb_id:
+            asyncio.create_task(asyncio.to_thread(self.client.answer_callback_query, cb_id))
+        user_state = USER_STATES.get(user_id, {})
+        matches = user_state.get("matches", [])
+        match_idx = 0
+        for idx, m in enumerate(matches):
+            if str(m.get("id")) == str(match_id) or str(m.get("match_id")) == str(match_id):
+                match_idx = idx
+                break
+        await self._handle_match_click_async(chat_id, user_id, match_idx, cb_id)
 
     async def _handle_match_click_async(self, chat_id: str | int, user_id: int, match_idx: int, cb_id: str):
         """Step 2: Team selection buttons with fresh real-time live match re-scrape."""
@@ -1996,6 +2044,39 @@ class TelegramOddsBot:
 
     def _on_error(self, job: TrackJob, err_msg: str):
         pass
+
+
+async def matches_command(update, context):
+    await update.message.reply_text("🔄 Fetching live exchange fixtures...")
+    matches = await get_live_matches()
+
+    if not matches:
+        await update.message.reply_text(
+            "⚠️ No active live exchange matches found right now.\n"
+            "Check Render logs to see API status."
+        )
+        return
+
+    # 2-column keyboard
+    keyboard = []
+    for i in range(0, len(matches), 2):
+        row = [
+            InlineKeyboardButton(
+                matches[i]["name"][:20], 
+                callback_data=f"match_{matches[i]['id']}"
+            )
+        ]
+        if i + 1 < len(matches):
+            row.append(
+                InlineKeyboardButton(
+                    matches[i+1]["name"][:20], 
+                    callback_data=f"match_{matches[i+1]['id']}"
+                )
+            )
+        keyboard.append(row)
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("🏏 *Live Exchange Matches:*", reply_markup=reply_markup, parse_mode="Markdown")
 
 
 if __name__ == "__main__":
