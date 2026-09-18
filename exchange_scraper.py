@@ -1,22 +1,30 @@
 import asyncio
 import logging
-import re
 import requests
+import re
 
 logger = logging.getLogger(__name__)
 
-WORKER_BASE = "https://yellow-voice-8690.chintuself13.workers.dev"
+EVENT_LIST_URL = "https://api.cricway.app/api/guest/event_list"
+ODDS_URL = "https://odds.oramo247.com/ws/getMarketDataNew"
+
+COMMON_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.lotus365.vip/",
+    "Origin": "https://www.lotus365.vip"
+}
 
 BLOCKED_KEYWORDS = ["t10", "simulated", "srl", "virtual", "cyber", "electronic"]
 
-DEFAULT_DOMAIN = "https://central.zplay1.in"
+DEFAULT_DOMAIN = "https://www.lotus365.vip"
 CURRENT_EXCHANGE_URL = DEFAULT_DOMAIN
 BASE_URL = DEFAULT_DOMAIN
 BASE_EXCHANGE_URL = DEFAULT_DOMAIN
-DEFAULT_CATALOG_URL = WORKER_BASE
-CURRENT_CATALOG_URL = WORKER_BASE
-DEFAULT_ODDS_URL = DEFAULT_DOMAIN
-CURRENT_ODDS_URL = DEFAULT_DOMAIN
+DEFAULT_CATALOG_URL = EVENT_LIST_URL
+CURRENT_CATALOG_URL = EVENT_LIST_URL
+DEFAULT_ODDS_URL = ODDS_URL
+CURRENT_ODDS_URL = ODDS_URL
 
 def set_exchange_url(new_url: str) -> str:
     global CURRENT_EXCHANGE_URL, BASE_URL, BASE_EXCHANGE_URL
@@ -67,8 +75,10 @@ def format_indian_odds(price):
     except Exception:
         return str(price)
 
-class ExchangeScraper:
+class LotusExchangeScraper:
     def __init__(self):
+        self.headers = COMMON_HEADERS
+        self.market_map = {}  # maps event_id -> primary market_id
         self.manual_overrides = {}
 
     def _clean_team_name(self, name: str) -> str:
@@ -87,75 +97,75 @@ class ExchangeScraper:
     async def close_async(self):
         pass
 
-    def _fetch_from_worker(self, endpoint_path: str):
-        url = f"{WORKER_BASE}{endpoint_path}"
-        try:
-            r = requests.get(url, timeout=15)
-            if r.status_code == 200 and r.text.strip():
-                return r.json()
-            logger.warning(f"[SCRAPER] Proxy returned status {r.status_code} for {endpoint_path}")
-        except Exception as e:
-            logger.error(f"[SCRAPER] Proxy fetch failed for {endpoint_path}: {e}")
-        return None
-
     def _fetch_fixtures_sync(self):
-        paths = [
-            "/pb/api/v1/events/matches/4",
-            "/pb/api/v1/events/matches/inplay"
-        ]
-        all_items = []
-        for path in paths:
-            data = self._fetch_from_worker(path)
-            if data:
-                items = []
-                if isinstance(data, list):
-                    items = data
-                elif isinstance(data, dict):
-                    for key in ["data", "events", "matches", "result", "items"]:
-                        val = data.get(key)
-                        if isinstance(val, list):
-                            items = val
-                            break
-                        elif isinstance(val, dict):
-                            items = list(val.values())
-                            break
-                    if not items and "data" in data and isinstance(data["data"], dict):
-                        items = data["data"].get("events", []) or data["data"].get("matches", [])
-                all_items.extend(items)
-        return all_items
+        try:
+            r = requests.get(EVENT_LIST_URL, headers=self.headers, timeout=12)
+            logger.info(f"[SCRAPER] Event list status: {r.status_code}")
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            logger.error(f"[SCRAPER] Event list fetch error: {e}")
+        return {}
 
     async def get_live_matches(self):
         data = await asyncio.to_thread(self._fetch_fixtures_sync)
-        items = data if isinstance(data, list) else []
-        logger.info(f"[SCRAPER] Fixture candidates: {len(items)}")
+        
+        # Traverse guest event response
+        raw_events = []
+        if isinstance(data, dict):
+            d_val = data.get("data", {})
+            if isinstance(d_val, dict):
+                if "events" in d_val and isinstance(d_val["events"], list):
+                    raw_events.extend(d_val["events"])
+                if "4" in d_val and isinstance(d_val["4"], dict):
+                    for tour in d_val["4"].values():
+                        if isinstance(tour, dict) and "matches" in tour:
+                            raw_events.extend(tour["matches"].values() if isinstance(tour["matches"], dict) else tour["matches"])
+                        elif isinstance(tour, list):
+                            raw_events.extend(tour)
+            elif isinstance(d_val, list):
+                raw_events = d_val
+            elif "events" in data:
+                raw_events = data["events"]
+
+        logger.info(f"[SCRAPER] Raw events collected: {len(raw_events)}")
 
         real_matches = []
         seen = set()
 
-        for item in items:
+        for item in raw_events:
             if not isinstance(item, dict):
                 continue
 
+            # Ensure cricket sport (4) if sport/event_type ID is present
+            e_type = str(item.get("event_type_id") or item.get("sport_id") or "").strip()
+            if e_type and e_type != "4":
+                continue
+
             name = (
-                item.get("name") 
-                or item.get("eventName") 
-                or item.get("matchName") 
-                or item.get("event_name")
-                or item.get("title")
+                item.get("event_name")
+                or item.get("eventName")
+                or item.get("name")
+                or item.get("match_name")
                 or ""
             ).strip()
 
+            e_id = str(
+                item.get("event_id")
+                or item.get("eventId")
+                or item.get("id")
+                or ""
+            ).strip()
+
+            # Capture market id
             m_id = str(
-                item.get("eventId") 
-                or item.get("id") 
-                or item.get("marketId") 
-                or item.get("event_id") 
-                or item.get("gameId")
-                or item.get("matchId")
-                or ""
+                item.get("market_id")
+                or item.get("marketId")
+                or (item.get("markets", [{}])[0].get("market_id") if isinstance(item.get("markets"), list) and item.get("markets") else "")
+                or e_id
             ).strip()
 
-            if not name or not m_id or m_id in seen:
+            if not name or not e_id or e_id in seen:
                 continue
 
             lower_name = name.lower()
@@ -165,16 +175,18 @@ class ExchangeScraper:
             if any(b in lower_name for b in BLOCKED_KEYWORDS):
                 continue
 
-            seen.add(m_id)
+            seen.add(e_id)
+            self.market_map[e_id] = m_id
             real_matches.append({
-                "id": m_id,
-                "match_id": m_id,
-                "match_slug": m_id,
+                "id": e_id,
+                "match_id": e_id,
+                "match_slug": e_id,
                 "name": name,
-                "title": name
+                "title": name,
+                "market_id": m_id
             })
 
-        logger.info(f"[SCRAPER] Ready matches: {len(real_matches)}")
+        logger.info(f"[SCRAPER] Usable live cricket matches: {len(real_matches)}")
         return real_matches
 
     async def fetch_live_matches_async(self):
@@ -187,8 +199,22 @@ class ExchangeScraper:
             return []
 
     def _fetch_odds_sync(self, match_id: str):
-        path = f"/pb/api/v1/events/matchDetails/{match_id}"
-        return self._fetch_from_worker(path)
+        market_id = self.market_map.get(str(match_id), str(match_id))
+        payload = {"market_ids[]": market_id}
+        
+        try:
+            r = requests.post(
+                ODDS_URL,
+                headers=self.headers,
+                data=payload,
+                timeout=10
+            )
+            if r.status_code == 200:
+                return r.json()
+            logger.warning(f"[SCRAPER] Odds fetch bad status: {r.status_code}")
+        except Exception as e:
+            logger.error(f"[SCRAPER] Odds request failed for {match_id}: {e}")
+        return None
 
     async def get_match_odds(self, match_id: str):
         return await asyncio.to_thread(self._fetch_odds_sync, match_id)
@@ -202,16 +228,13 @@ class ExchangeScraper:
 
     async def _extract_odds_from_details(self, match_id: str):
         data = await self.get_match_odds(match_id)
-        if not data or not isinstance(data, dict):
+        if not data or not isinstance(data, (dict, list)):
             return []
-        
-        markets = data.get("markets") or data.get("data") or []
-        if isinstance(data.get("runners"), list):
-            return data.get("runners")
-        if isinstance(markets, list):
-            for m in markets:
-                if isinstance(m, dict) and m.get("runners"):
-                    return m.get("runners")
+
+        items = data if isinstance(data, list) else (data.get("data") or data.get("result") or [data])
+        for item in items:
+            if isinstance(item, dict) and "runners" in item:
+                return item["runners"]
         return []
 
     async def get_live_odds_data_for_match_slug_async(self, match_slug: str, team_name: str):
@@ -301,8 +324,8 @@ class ExchangeScraper:
             c_team = clean_team_name(team_name)
             return self.manual_overrides.get(c_team)
 
-# Global singleton and module-level functions
-global_exchange_scraper = ExchangeScraper()
+ExchangeScraper = LotusExchangeScraper
+global_exchange_scraper = LotusExchangeScraper()
 
 async def get_live_matches():
     return await global_exchange_scraper.get_live_matches()
