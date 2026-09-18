@@ -50,16 +50,31 @@ WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
 def _fetch_worker_data():
-    worker_url = "https://yellow-voice-8690.chintuself13.workers.dev"
-    req = urllib.request.Request(
-        worker_url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            "Accept": "application/json"
-        }
-    )
-    with urllib.request.urlopen(req, timeout=15) as response:
-        return json.loads(response.read().decode('utf-8'))
+    target = "https://yellow-voice-8690.chintuself13.workers.dev"
+    proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(target)}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    try:
+        req = urllib.request.Request(proxy_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as response:
+            wrapper = json.loads(response.read().decode('utf-8'))
+            raw_contents = wrapper.get("contents", "")
+            if raw_contents and raw_contents.strip().startswith(("{", "[")):
+                return json.loads(raw_contents)
+    except Exception as e:
+        logger.warning(f"[SCRAPER] AllOrigins proxy fetch notice: {e}")
+
+    # Fallback to direct worker request
+    try:
+        req_direct = urllib.request.Request(target, headers=headers)
+        with urllib.request.urlopen(req_direct, timeout=15) as resp_direct:
+            raw_text = resp_direct.read().decode('utf-8')
+            if raw_text and raw_text.strip().startswith(("{", "[")):
+                return json.loads(raw_text)
+    except Exception as e:
+        logger.error(f"[SCRAPER] Direct worker fetch error: {e}")
+
+    return None
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
