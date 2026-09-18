@@ -10,6 +10,13 @@ import asyncio
 import aiohttp
 from typing import Dict, List, Any, Optional, Tuple
 
+try:
+    from curl_cffi.requests import AsyncSession
+    HAS_CURL_CFFI = True
+except ImportError:
+    AsyncSession = None
+    HAS_CURL_CFFI = False
+
 logger = logging.getLogger("ExchangeScraper")
 
 DEFAULT_DOMAIN = "https://reddybook.info"
@@ -36,44 +43,55 @@ WS_URL = CURRENT_ODDS_URL.replace("https://", "wss://").replace("http://", "ws:/
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches from Cricbet99 event list feed using open proxies to bypass Cloudflare 403 on Render.
+    Fetches live cricket matches from Cricbet99 event list feed using curl_cffi Chrome impersonation to bypass Cloudflare 403 on Render.
     """
-    raw_target = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://api.cricbet99.click/api/guest/event_list"
-    encoded_target = urllib.parse.quote(raw_target, safe="")
-
-    proxy_urls = [
-        f"https://api.allorigins.win/raw?url={encoded_target}",
-        f"https://corsproxy.io/?{encoded_target}",
-        raw_target
-    ]
-
+    target_api = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL else "https://api.cricbet99.click/api/guest/event_list"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
         "Origin": "https://reddybook.info",
-        "Referer": "https://reddybook.info/"
+        "Referer": "https://reddybook.info/",
+        "Accept-Language": "en-US,en;q=0.9"
     }
 
     payload = None
-    session = await global_exchange_scraper.get_aiohttp_session()
 
-    for url in proxy_urls:
+    if HAS_CURL_CFFI and AsyncSession is not None:
         try:
-            logger.info(f"[SCRAPER] Attempting Cricbet event list fetch via: {url[:80]}...")
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    if text and text.strip().startswith(("{", "[")):
-                        payload = json.loads(text)
-                        logger.info(f"[SCRAPER] Successfully fetched event list via {url[:60]}")
-                        break
+            logger.info(f"[SCRAPER] Attempting Cricbet event list fetch via curl_cffi (chrome124): {target_api}")
+            async with AsyncSession(impersonate="chrome124") as s:
+                res = await s.get(target_api, headers=headers, timeout=15)
+                if res.status_code == 200:
+                    payload = res.json()
+                    logger.info("[SCRAPER] Successfully bypassed Cloudflare via curl_cffi!")
                 else:
-                    logger.warning(f"[SCRAPER] Endpoint {url[:60]} returned HTTP status {resp.status}")
+                    logger.error(f"[SCRAPER] Impersonate fetch returned status {res.status_code}")
         except Exception as e:
-            logger.warning(f"[SCRAPER] Exception fetching via endpoint {url[:60]}: {e}")
+            logger.error(f"[SCRAPER] Curl_cffi fetch failed: {e}")
 
     if not payload:
-        logger.error("[SCRAPER] Failed to fetch live matches from all proxy and direct endpoints.")
+        # Fallback to proxy/aiohttp loop if curl_cffi unavailable or failed
+        encoded_target = urllib.parse.quote(target_api, safe="")
+        proxy_urls = [
+            f"https://api.allorigins.win/raw?url={encoded_target}",
+            f"https://corsproxy.io/?{encoded_target}",
+            target_api
+        ]
+        session = await global_exchange_scraper.get_aiohttp_session()
+        for url in proxy_urls:
+            try:
+                logger.info(f"[SCRAPER] Fallback Cricbet fetch via: {url[:80]}...")
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
+                    if resp.status == 200:
+                        text = await resp.text()
+                        if text and text.strip().startswith(("{", "[")):
+                            payload = json.loads(text)
+                            logger.info(f"[SCRAPER] Successfully fetched event list via fallback {url[:60]}")
+                            break
+            except Exception as e:
+                logger.warning(f"[SCRAPER] Exception during fallback fetch via {url[:60]}: {e}")
+
+    if not payload:
+        logger.error("[SCRAPER] Failed to fetch live matches from all endpoints.")
         return []
 
     events = payload.get("data", {}).get("events", []) if isinstance(payload, dict) else []
