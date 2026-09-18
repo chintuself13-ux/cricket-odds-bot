@@ -50,31 +50,48 @@ WS_TASK: Optional[asyncio.Task] = None
 WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
-def _fetch_from_worker():
-    url = "https://yellow-voice-8690.chintuself13.workers.dev/"
+def _fetch_live_odds_feed():
+    mirrors = [
+        "https://api.betbhai9.com/api/guest/event_list",
+        "https://api.skyfair.vip/api/guest/event_list",
+        "https://api.laser247.today/api/guest/event_list",
+        "https://yellow-voice-8690.chintuself13.workers.dev/"
+    ]
     headers = {
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    if HAS_CURL_CFFI:
-        from curl_cffi import requests as cffi_requests
-        r = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=20)
-        logger.info(f"[SCRAPER] Worker status: {r.status_code}, preview: {r.text[:100]}")
-        return json.loads(r.text)
-    else:
-        r = requests.get(url, headers=headers, timeout=20)
-        logger.info(f"[SCRAPER] Worker status: {r.status_code}, preview: {r.text[:100]}")
-        return json.loads(r.text)
+
+    for url in mirrors:
+        try:
+            if HAS_CURL_CFFI:
+                from curl_cffi import requests as cffi_requests
+                r = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=8)
+                if r.status_code == 200 and r.text.strip().startswith(("{", "[")):
+                    return json.loads(r.text)
+            else:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    raw_text = resp.read().decode('utf-8')
+                    if raw_text and raw_text.strip().startswith(("{", "[")):
+                        return json.loads(raw_text)
+        except Exception:
+            continue
+    return {}
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches via requests from verified worker.
+    Fetches live cricket matches using active bookmaker exchange mirrors.
     """
     try:
-        payload = await asyncio.to_thread(_fetch_from_worker)
+        payload = await asyncio.to_thread(_fetch_live_odds_feed)
     except Exception as e:
-        logger.error(f"[SCRAPER] Worker fetch failed: {e}")
+        logger.error(f"[SCRAPER] All exchange mirrors failed: {e}")
+        return []
+
+    if not payload or not isinstance(payload, dict):
+        logger.error("[SCRAPER] Empty payload returned from active mirrors.")
         return []
 
     data_block = payload.get("data", {}) if isinstance(payload, dict) else {}
@@ -82,7 +99,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
     if not isinstance(events, list):
         events = []
 
-    logger.info(f"[SCRAPER] Total events in stream: {len(events)}")
+    logger.info(f"[SCRAPER] Successfully received {len(events)} events from active mirror")
 
     real_matches = []
     seen = set()
