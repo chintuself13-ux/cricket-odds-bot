@@ -93,23 +93,18 @@ async def get_live_matches() -> List[Dict[str, Any]]:
         logger.error("[SCRAPER] All exchange endpoints and Cloudflare Worker failed.")
         return []
 
-    data_block = payload.get("data") if isinstance(payload, dict) else {}
-    if isinstance(data_block, dict):
-        raw_events = data_block.get("events", [])
-    elif isinstance(payload, dict):
-        raw_events = payload.get("events") or payload.get("data") or payload.get("result") or []
-    else:
-        raw_events = []
+    events = payload.get("data", {}).get("events", []) if isinstance(payload, dict) else []
+    if not events and isinstance(payload, dict):
+        events = payload.get("events") or payload.get("data") or payload.get("result") or []
+    if not isinstance(events, list):
+        events = []
 
-    if not isinstance(raw_events, list):
-        raw_events = []
-
-    logger.info(f"[SCRAPER] Extracted {len(raw_events)} total events from worker")
+    logger.info(f"[SCRAPER] Extracted {len(events)} total events from worker")
 
     real_matches = []
     seen_ids = set()
 
-    for item in raw_events:
+    for item in events:
         if not isinstance(item, dict):
             continue
 
