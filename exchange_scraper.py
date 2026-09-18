@@ -49,50 +49,35 @@ WS_TASK: Optional[asyncio.Task] = None
 WS_URL = "wss://odd.ocric99.com/ws/getMarketDataNew"
 
 
-def _fetch_direct_worker():
-    url = "https://yellow-voice-8690.chintuself13.workers.dev"
-    data = b'{"action":"sync"}'
+def _fetch_direct_exchange():
+    url = CURRENT_CATALOG_URL if CURRENT_CATALOG_URL and "cricbet" in CURRENT_CATALOG_URL else "https://api.cricbet99.click/api/guest/event_list"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://reddybook.club",
+        "Referer": "https://reddybook.club/"
     }
-    
-    # 1. Try POST request
-    try:
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            content = resp.read().decode('utf-8')
-            if content and content.strip() and content.strip().startswith(("{", "[")):
-                return json.loads(content)
-    except Exception as e:
-        logger.warning(f"[SCRAPER] Worker POST request notice: {e}")
-
-    # 2. Fallback to GET request
-    try:
-        req_get = urllib.request.Request(url, headers={"User-Agent": headers["User-Agent"], "Accept": "application/json"})
-        with urllib.request.urlopen(req_get, timeout=20) as resp_get:
-            content = resp_get.read().decode('utf-8')
-            if content and content.strip() and content.strip().startswith(("{", "[")):
-                return json.loads(content)
-    except Exception as e:
-        logger.error(f"[SCRAPER] Worker GET request notice: {e}")
-
-    return {}
+    if HAS_CURL_CFFI:
+        from curl_cffi import requests as cffi_requests
+        r = cffi_requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+        return r.json()
+    else:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode('utf-8'))
 
 
 async def get_live_matches() -> List[Dict[str, Any]]:
     """
-    Fetches live cricket matches directly via Cloudflare Worker POST request.
+    Fetches live cricket matches directly using curl_cffi Chrome 120 TLS impersonation.
     """
     try:
-        payload = await asyncio.to_thread(_fetch_direct_worker)
+        payload = await asyncio.to_thread(_fetch_direct_exchange)
     except Exception as e:
-        logger.error(f"[SCRAPER] Direct worker error: {e}")
+        logger.error(f"[SCRAPER] Direct exchange fetch failed: {e}")
         return []
 
-    if not payload:
-        logger.error("[SCRAPER] Empty payload returned from direct worker request.")
+    if not payload or not isinstance(payload, dict):
+        logger.error("[SCRAPER] Empty or invalid payload from direct exchange.")
         return []
 
     data_block = payload.get("data") if isinstance(payload, dict) else {}
@@ -100,7 +85,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
     if not isinstance(events, list):
         events = []
 
-    logger.info(f"[SCRAPER] Events received: {len(events)}")
+    logger.info(f"[SCRAPER] Total events parsed: {len(events)}")
 
     real_matches = []
     seen = set()
@@ -144,7 +129,7 @@ async def get_live_matches() -> List[Dict[str, Any]]:
             "odds": []
         })
 
-    logger.info(f"[SCRAPER] Final match count: {len(real_matches)}")
+    logger.info(f"[SCRAPER] Returning {len(real_matches)} valid cricket matches")
     return real_matches
 
 
