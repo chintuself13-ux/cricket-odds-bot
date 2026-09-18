@@ -1,12 +1,18 @@
 import asyncio
 import logging
 import re
-import requests
+
+try:
+    from curl_cffi import requests as c_requests
+    USE_CURL = True
+except ImportError:
+    import requests as c_requests
+    USE_CURL = False
 
 logger = logging.getLogger(__name__)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Origin": "https://shubhlabh777.live",
     "Referer": "https://shubhlabh777.live/"
@@ -22,6 +28,12 @@ DEFAULT_CATALOG_URL = DEFAULT_DOMAIN
 CURRENT_CATALOG_URL = DEFAULT_DOMAIN
 DEFAULT_ODDS_URL = DEFAULT_DOMAIN
 CURRENT_ODDS_URL = DEFAULT_DOMAIN
+
+def _get(url):
+    kwargs = {"headers": HEADERS, "timeout": 15}
+    if USE_CURL:
+        kwargs["impersonate"] = "chrome120"
+    return c_requests.get(url, **kwargs)
 
 def set_exchange_url(new_url: str) -> str:
     global CURRENT_EXCHANGE_URL, BASE_URL, BASE_EXCHANGE_URL
@@ -97,13 +109,13 @@ class ExchangeScraper:
 
     def _fetch_fixtures_sync(self):
         urls = [
-            "https://central.zplay1.in/pb/api/v1/events/matches/inplay",
-            "https://central.zplay1.in/pb/api/v1/events/matches/4"
+            "https://central.zplay1.in/pb/api/v1/events/matches/4",
+            "https://central.zplay1.in/pb/api/v1/events/matches/inplay"
         ]
         all_items = []
         for url in urls:
             try:
-                r = requests.get(url, headers=self.headers, timeout=12)
+                r = _get(url)
                 logger.info(f"[SCRAPER] Fetch {url} -> Status: {r.status_code}")
                 if r.status_code == 200:
                     data = r.json()
@@ -124,7 +136,7 @@ class ExchangeScraper:
                             items = data["data"].get("events", []) or data["data"].get("matches", [])
                         all_items.extend(items)
                 else:
-                    logger.warning(f"[SCRAPER] Bad status {r.status_code} response: {r.text[:200]}")
+                    logger.warning(f"[SCRAPER] {url} returned status {r.status_code}: {r.text[:200]}")
             except Exception as e:
                 logger.error(f"[SCRAPER] Request failed for {url}: {e}")
         return all_items
@@ -165,7 +177,6 @@ class ExchangeScraper:
                 continue
 
             lower_name = name.lower()
-            # Allow common separator patterns
             if not (" v " in lower_name or " vs " in lower_name or " - " in lower_name):
                 continue
 
@@ -196,9 +207,11 @@ class ExchangeScraper:
     def _fetch_odds_sync(self, match_id: str):
         url = f"https://central.zplay1.in/pb/api/v1/events/matchDetails/{match_id}"
         try:
-            r = requests.get(url, headers=self.headers, timeout=12)
+            r = _get(url)
             if r.status_code == 200:
                 return r.json()
+            else:
+                logger.warning(f"[SCRAPER] Odds fetch for {match_id} returned status {r.status_code}")
         except Exception as e:
             logger.error(f"[SCRAPER] Match details fetch error for {match_id}: {e}")
         return None
